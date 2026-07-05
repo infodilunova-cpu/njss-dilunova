@@ -1,0 +1,4 @@
+# ローカルでのデータ更新（update.py / スクレイピング）に必要。デプロイ先には入れない。
+-r requirements.txt
+playwright>=1.44
+# 初回のみ: python -m playwright install chromium

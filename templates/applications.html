@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}入札 工程＆協力会社 管理 — {{ config.company_name }}{% endblock %}
+
+{% block content %}
+<div id="app-root" class="bidapp">
+  <div class="bidapp-head">
+    <h1>入札・工程＆協力会社 管理</h1>
+    <span class="basis">{{ config.company_name }} ・ 基準日 {{ config.today }}</span>
+  </div>
+
+  <nav class="bidtabs" id="bidTabs"></nav>
+  <div id="tabPanel"></div>
+</div>
+
+<!-- サーバから渡すデータ（クライアントアプリが読む） -->
+<script id="cfgData" type="application/json">{{ config | tojson }}</script>
+<script id="casesData" type="application/json">{{ cases | tojson }}</script>
+<script id="companiesData" type="application/json">{{ companies | tojson }}</script>
+
+<!-- 編集モーダル -->
+<div id="modalRoot"></div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='applications.js') }}?v=13"></script>
+{% endblock %}

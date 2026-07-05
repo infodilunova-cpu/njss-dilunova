@@ -1,0 +1,203 @@
+{% extends "base.html" %}
+{% block title %}マイ条件 — {{ brand.brand_title }}{% endblock %}
+
+{% block content %}
+<div class="topbar"><h1>マイ条件（保有資格・対応範囲）</h1></div>
+<p class="lead">あなたの会社の対応エリア・業種・規模を登録すると、「マッチ案件」で条件に合う案件だけをリサーチして表示します。</p>
+
+<form class="profile-form" method="post" action="{{ url_for('profile') }}">
+  <section class="pf-block">
+    <h2>会社情報</h2>
+    <p class="pf-hint">自社名は競合一覧からの自社除外に使います。代表者・本社・法人番号は各種資格通知の控えとして保持します。</p>
+    <div class="pf-grid">
+      <label class="pf-fld"><span>自社名</span>
+        <input type="text" name="company" value="{{ prof.company }}" placeholder="例: 川野電気（株）"></label>
+      <label class="pf-fld"><span>代表者</span>
+        <input type="text" name="representative" value="{{ prof.representative }}" placeholder="例: 川野 善輝"></label>
+      <label class="pf-fld"><span>法人番号</span>
+        <input type="text" name="corp_number" value="{{ prof.corp_number }}" placeholder="13桁"></label>
+      <label class="pf-fld grow"><span>本社所在地</span>
+        <input type="text" name="address" value="{{ prof.address }}" placeholder="例: 〒581-0039 大阪府八尾市太田新町8-29"></label>
+    </div>
+  </section>
+
+  <section class="pf-block">
+    <h2>対応エリア（都道府県）</h2>
+    <p class="pf-hint">入札参加できる／したい都道府県をすべて選択。</p>
+    {% for region, prefs in regions.items() %}
+      <div class="pref-group">
+        <div class="pref-group-name">{{ region }}</div>
+        <div class="pref-checks">
+          {% for pref in prefs %}
+            <label class="check">
+              <input type="checkbox" name="prefectures" value="{{ pref }}"
+                     {{ 'checked' if pref in selected_prefs }}>
+              <span>{{ pref }}</span>
+            </label>
+          {% endfor %}
+        </div>
+      </div>
+    {% endfor %}
+  </section>
+
+  <section class="pf-block">
+    <h2>対応業種（複数選択可）</h2>
+    <p class="pf-hint">入札に参加できる工事の種類をすべて選択。</p>
+    <div class="pref-checks">
+      {% for b in biz_types %}
+        <label class="check">
+          <input type="checkbox" name="categories" value="{{ b }}" {{ 'checked' if b in selected_cats }}>
+          <span>{{ b }}</span>
+        </label>
+      {% endfor %}
+    </div>
+    <input type="text" name="categories_other" placeholder="その他の業種（カンマ区切りで追加）"
+           value="{{ selected_cats | reject('in', biz_types) | join(', ') }}">
+  </section>
+
+  <div class="pf-row">
+    <section class="pf-block">
+      <h2>予算上限（任意）</h2>
+      <p class="pf-hint">予定価格がこの金額以下の案件に絞る。空欄で制限なし。</p>
+      <input type="text" name="budget_max" value="{{ prof.budget_max }}" placeholder="例: 100,000,000">
+    </section>
+    <section class="pf-block">
+      <h2>経審等級（参考）</h2>
+      <p class="pf-hint">自社の格付。記録用（マッチには未使用）。</p>
+      <input type="text" name="grade" value="{{ prof.grade }}" placeholder="例: B">
+    </section>
+  </div>
+
+  <section class="pf-block">
+    <h2>保有資格・登録（複数選択可）</h2>
+    <p class="pf-hint">自社が持っている許可・資格・登録をすべて選択。</p>
+    <div class="pref-checks">
+      {% for qopt in qual_options %}
+        <label class="check">
+          <input type="checkbox" name="quals" value="{{ qopt }}" {{ 'checked' if qopt in selected_quals }}>
+          <span>{{ qopt }}</span>
+        </label>
+      {% endfor %}
+    </div>
+    <input type="text" name="quals_other" placeholder="その他の資格・登録（カンマ区切りで追加）"
+           value="{{ selected_quals | reject('in', qual_options) | join(', ') }}">
+  </section>
+
+  <section class="pf-block">
+    <h2>入札参加資格・等級（発注機関別）</h2>
+    <p class="pf-hint">資格通知書の等級をここに登録すると、AIの応募可否判定が「この案件の発注機関で自社は何等級か」を照合できます。
+      <strong>同じ経審点でも機関ごとに等級が変わる</strong>（例: 経審621点でも国交省=B／法務省・裁判所=C）ため、機関別に持つのが正確です。</p>
+    <div class="qual-wrap">
+      <table class="list qual-table">
+        <thead>
+          <tr><th>発注機関</th><th>工種</th><th>等級</th><th>点数</th><th>有効期限</th><th>登録番号</th><th>備考</th><th></th></tr>
+        </thead>
+        <tbody id="qualRows"></tbody>
+      </table>
+      <button type="button" class="btn ghost small" id="qualAdd">＋ 等級を追加</button>
+    </div>
+  </section>
+
+  <input type="hidden" name="qualifications" id="qualInput" value="[]">
+
+  <div class="pf-actions">
+    <button type="submit" class="btn primary">保存してマッチ案件を見る</button>
+    <button type="submit" class="btn ghost" name="stay" value="1">保存（このまま編集を続ける）</button>
+  </div>
+</form>
+
+<script id="qualData" type="application/json">{{ prof.qualifications | tojson }}</script>
+{% endblock %}
+
+{% block scripts %}
+<script>
+/* 発注機関別の等級エディタ。行を追加/削除し、送信時に #qualInput へJSON化して詰める。 */
+(function () {
+  var tbody = document.getElementById('qualRows');
+  var addBtn = document.getElementById('qualAdd');
+  if (!tbody || !addBtn) return;
+  var esc = function (s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : s); return d.innerHTML; };
+  var WORKS = {{ biz_types | tojson }};
+  var GRADES = ['', 'A', 'B', 'C', 'D', 'E'];
+  function sel(opts, v) { return opts.map(function (o) { return '<option' + (o === v ? ' selected' : '') + '>' + esc(o) + '</option>'; }).join(''); }
+
+  function addRow(q) {
+    q = q || {};
+    var tr = document.createElement('tr');
+    tr.className = 'qrow';
+    tr.innerHTML =
+      '<td><input class="q-issuer" value="' + esc(q.issuer) + '" placeholder="例: 国土交通省 / 大阪府 / 八尾市"></td>' +
+      '<td><select class="q-cat">' + sel(WORKS, q.category || '電気工事') + '</select></td>' +
+      '<td><select class="q-grade">' + sel(GRADES, q.grade || '') + '</select></td>' +
+      '<td><input class="q-score" value="' + esc(q.score) + '" placeholder="点数"></td>' +
+      '<td><input class="q-valid" value="' + esc(q.valid_until) + '" placeholder="例: 令和9年3月31日"></td>' +
+      '<td><input class="q-num" value="' + esc(q.number) + '" placeholder="登録/業者番号"></td>' +
+      '<td><input class="q-note" value="' + esc(q.note) + '" placeholder="備考"></td>' +
+      '<td class="center"><button type="button" class="btn ghost small q-del">×</button></td>';
+    tr.querySelector('.q-del').addEventListener('click', function () { tr.remove(); });
+    tbody.appendChild(tr);
+  }
+  function collect() {
+    return Array.prototype.map.call(tbody.querySelectorAll('.qrow'), function (tr) {
+      return {
+        issuer: tr.querySelector('.q-issuer').value.trim(),
+        category: tr.querySelector('.q-cat').value,
+        grade: tr.querySelector('.q-grade').value,
+        score: tr.querySelector('.q-score').value.trim(),
+        valid_until: tr.querySelector('.q-valid').value.trim(),
+        number: tr.querySelector('.q-num').value.trim(),
+        note: tr.querySelector('.q-note').value.trim()
+      };
+    }).filter(function (q) { return q.issuer; });
+  }
+  window.__collectQuals = collect;
+
+  var initial = [];
+  try { initial = JSON.parse(document.getElementById('qualData').textContent) || []; } catch (e) {}
+  if (initial.length) initial.forEach(addRow); else addRow();
+  addBtn.addEventListener('click', function () { addRow(); });
+})();
+</script>
+<script>
+/* マイ条件をブラウザにも保存（無料ホストでサーバ側が消えても自動復元できるように）。 */
+(function () {
+  var KEY = 'kawanoProfile';
+  var qd = []; try { qd = JSON.parse(document.getElementById('qualData').textContent) || []; } catch (e) {}
+  // サーバの現在値をミラー保存（空なら触らない）
+  var server = {
+    company: {{ prof.company | tojson }},
+    representative: {{ prof.representative | tojson }},
+    address: {{ prof.address | tojson }},
+    corp_number: {{ prof.corp_number | tojson }},
+    prefectures: {{ selected_prefs | tojson }},
+    categories: {{ selected_cats | tojson }},
+    quals: {{ selected_quals | tojson }},
+    budget_max: {{ prof.budget_max | tojson }},
+    grade: {{ prof.grade | tojson }},
+    qualifications: qd
+  };
+  if ((server.prefectures && server.prefectures.length) || qd.length) {
+    localStorage.setItem(KEY, JSON.stringify(server));
+  }
+  // 送信時にもブラウザへ保存＋等級をhiddenへ
+  var form = document.querySelector('.profile-form');
+  if (form) form.addEventListener('submit', function () {
+    var val = function (n) { var e = form.querySelector('[name="' + n + '"]'); return e ? e.value : ''; };
+    var checked = function (n) { return [].map.call(form.querySelectorAll('[name="' + n + '"]:checked'), function (e) { return e.value; }); };
+    var split = function (s) { return (s || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean); };
+    var quals = window.__collectQuals ? window.__collectQuals() : [];
+    var qi = document.getElementById('qualInput'); if (qi) qi.value = JSON.stringify(quals);
+    var data = {
+      company: val('company'), representative: val('representative'),
+      address: val('address'), corp_number: val('corp_number'),
+      prefectures: checked('prefectures'),
+      categories: checked('categories').concat(split(val('categories_other'))),
+      quals: checked('quals').concat(split(val('quals_other'))),
+      budget_max: val('budget_max'), grade: val('grade'),
+      qualifications: quals
+    };
+    if (data.prefectures.length || quals.length) localStorage.setItem(KEY, JSON.stringify(data));
+  });
+})();
+</script>
+{% endblock %}

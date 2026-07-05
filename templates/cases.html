@@ -1,0 +1,194 @@
+{% extends "base.html" %}
+{% block title %}案件を探す — {{ brand.brand_title }}{% endblock %}
+
+{% block content %}
+<div class="hero hero-{{ nav_active }}">
+  <div class="hero-icon">{{ view.icon }}</div>
+  <div class="hero-text">
+    <h1>{{ view.title }}</h1>
+    <p>{{ view.desc }}</p>
+  </div>
+  <div class="hero-count"><strong>{{ '{:,}'.format(pg.matched) }}</strong><span>件 該当</span></div>
+</div>
+
+<form class="filterbar" method="get" action="{{ url_for('cases') }}">
+  <label class="field">
+    <span>地方</span>
+    <select name="region" id="region">
+      <option value="">すべての地方</option>
+      {% for region in regions.keys() %}
+        <option value="{{ region }}" {{ 'selected' if selected.region == region }}>{{ region }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label class="field">
+    <span>都道府県</span>
+    <select name="prefecture" id="prefecture">
+      <option value="">すべて</option>
+      {% for pref in pref_options %}
+        <option value="{{ pref }}" {{ 'selected' if selected.prefecture == pref }}>{{ pref }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <div class="field">
+    <span>区分 <em>(複数選べます)</em></span>
+    <div class="chips">
+      {% for t in procurement_types %}
+        <label class="chip"><input type="checkbox" name="procurement_type" value="{{ t }}" {{ 'checked' if t in selected.procurement_type }}><span>{{ t }}</span></label>
+      {% endfor %}
+    </div>
+  </div>
+  <div class="field grow">
+    <span>業種 <em>(複数選べます)</em></span>
+    <div class="chips">
+      {% for c in categories %}
+        <label class="chip"><input type="checkbox" name="category" value="{{ c }}" {{ 'checked' if c in selected.category }}><span>{{ c }}</span></label>
+      {% endfor %}
+    </div>
+  </div>
+  <label class="field">
+    <span>新着</span>
+    <select name="fresh">
+      <option value="" {{ 'selected' if not selected.fresh }}>指定なし</option>
+      <option value="today" {{ 'selected' if selected.fresh == 'today' }}>今日の新着</option>
+      <option value="week"  {{ 'selected' if selected.fresh == 'week' }}>直近1週間</option>
+    </select>
+  </label>
+  <label class="field">
+    <span>予定価格</span>
+    <select name="budget_min">
+      {% for label, yen in budget_options %}
+        <option value="{{ yen }}" {{ 'selected' if selected.budget_min == yen }}>{{ label }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <div class="field grow">
+    <span>入札方式 <em>(複数選べます)</em></span>
+    <div class="chips scroll">
+      {% for m in bid_methods %}
+        <label class="chip"><input type="checkbox" name="bid_method" value="{{ m }}" {{ 'checked' if m in selected.bid_method }}><span>{{ m }}</span></label>
+      {% endfor %}
+    </div>
+  </div>
+  <label class="field">
+    <span>仕様書</span>
+    <select name="spec_status">
+      <option value="">すべて</option>
+      <option value="available"   {{ 'selected' if selected.spec_status == 'available' }}>取得可</option>
+      <option value="unavailable" {{ 'selected' if selected.spec_status == 'unavailable' }}>取得不可</option>
+      <option value="unknown"     {{ 'selected' if selected.spec_status == 'unknown' }}>未判定</option>
+    </select>
+  </label>
+  <label class="field grow">
+    <span>キーワード <em>(空白区切りで複数可・いずれか一致)</em></span>
+    <input type="text" name="q" value="{{ selected.q }}" placeholder="例: 受変電 LED 保安管理">
+  </label>
+  <label class="field">
+    <span>並び替え</span>
+    <select name="sort">
+      <option value="deadline"  {{ 'selected' if selected.sort == 'deadline' }}>締切が近い順</option>
+      <option value="announced" {{ 'selected' if selected.sort == 'announced' }}>公告が新しい順</option>
+      <option value="budget"    {{ 'selected' if selected.sort == 'budget' }}>予定価格が高い順</option>
+    </select>
+  </label>
+  <label class="field check">
+    <span>応募できる</span>
+    <label class="toggle"><input type="checkbox" name="open" value="1" {{ 'checked' if selected.open }}> 締切が今日以降のみ</label>
+  </label>
+  {# 終了タブの選択状態を絞り込み後も保持する #}
+  <input type="hidden" name="closed" value="{{ '1' if show_closed else '0' }}">
+  <div class="actions">
+    <button type="submit" class="btn primary">絞り込む</button>
+    <a class="btn" href="{{ url_for('cases') }}">クリア</a>
+  </div>
+</form>
+
+<div class="tabs">
+  <a class="tab {{ 'active' if not show_closed }}" href="{{ url_for('cases', closed='0', **base_args) }}">募集中・締切未定</a>
+  <a class="tab {{ 'active' if show_closed }}" href="{{ url_for('cases', closed='1', **base_args) }}">すべて（終了含む）</a>
+</div>
+
+<div class="result-head">
+  {% if pg.matched %}
+    <span class="count">{{ '{:,}'.format(pg.start) }}–{{ '{:,}'.format(pg.end) }} 件目</span>
+    <span class="muted">/ 該当 {{ '{:,}'.format(pg.matched) }} 件</span>
+  {% else %}
+    <span class="count">0 件</span>
+  {% endif %}
+  {% if not show_closed %}<span class="muted">（終了は非表示）</span>{% endif %}
+  <a class="btn" style="margin-left:auto" href="{{ url_for('export_csv') }}">CSVダウンロード ↓</a>
+</div>
+
+{% if rows %}
+<div class="case-list">
+  {% for c in rows %}
+  <a class="case-row {{ 'closed' if c.deadline and c.deadline < today }}" href="{{ url_for('case_detail', case_id=c.id) }}">
+    <div class="cr-main">
+      <div class="cr-title">{{ c.title }}</div>
+      <div class="cr-meta">
+        {% if c.deadline and c.deadline < today %}<span class="tag ended">終了</span>{% endif %}
+        {% if c.announced_date and c.announced_date == today %}<span class="tag today">本日</span>
+        {% elif c.announced_date and c.announced_date >= new_threshold %}<span class="tag new">新着</span>{% endif %}
+        {% if c.deadline and c.deadline >= today %}<span class="tag open">応募できる</span>{% endif %}
+        {% if c.procurement_type %}<span class="tag ptype">{{ c.procurement_type }}</span>{% endif %}
+        <span class="cr-agency">{{ c.agency }}</span>
+        {% if c.prefecture %}<span class="tag region">{{ c.prefecture }}</span>{% endif %}
+        <span class="tag cat">{{ c.category }}</span>
+      </div>
+      <div class="cr-sub">
+        {% if c.bid_method %}<span><span class="lbl">入札方式</span>{{ c.bid_method }}</span>{% endif %}
+        {% if c.announced_date %}<span><span class="lbl">公告</span>{{ c.announced_date }}</span>{% endif %}
+        {% if c.deadline %}<span class="deadline {{ 'past' if c.deadline < today else 'future' }}"><span class="lbl">締切</span>{{ c.deadline }}{{ '（終了）' if c.deadline < today else '' }}</span>{% endif %}
+        {% if c.budget %}<span class="price"><span class="lbl">予定価格</span>{{ c.budget }}</span>{% endif %}
+        {% if c.winner %}<span><span class="lbl">落札</span>{{ c.winner }}</span>{% endif %}
+      </div>
+    </div>
+    <div class="cr-side">
+      {% if c.spec_status == 'available' %}<span class="spec-pill ok">仕様書 取得可</span>
+      {% elif c.spec_status == 'unavailable' %}<span class="spec-pill ng">仕様書 取得不可</span>
+      {% else %}<span class="spec-pill unk">仕様書 未判定</span>{% endif %}
+      {% if c.spec_status == 'unavailable' and c.spec_reason %}
+        <span class="cr-reason">{{ spec_reasons.get(c.spec_reason, c.spec_reason) }}</span>
+      {% endif %}
+    </div>
+  </a>
+  {% endfor %}
+</div>
+
+{% if pg.total_pages > 1 %}
+<nav class="pager">
+  {% if pg.has_prev %}
+    <a class="btn" href="{{ url_for('cases', page=pg.page - 1, **page_args) }}">← 前の200件</a>
+  {% else %}
+    <span class="btn disabled">← 前の200件</span>
+  {% endif %}
+  <span class="pager-mid">{{ pg.page }} / {{ pg.total_pages }} ページ</span>
+  {% if pg.has_next %}
+    <a class="btn primary" href="{{ url_for('cases', page=pg.page + 1, **page_args) }}">次の200件 →</a>
+  {% else %}
+    <span class="btn disabled">次の200件 →</span>
+  {% endif %}
+</nav>
+{% endif %}
+{% else %}
+<p class="empty">条件に合う案件がありません。フィルタを緩めてみてください。</p>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const regionSel = document.getElementById('region');
+  const prefSel = document.getElementById('prefecture');
+  regionSel.addEventListener('change', async () => {
+    const region = regionSel.value;
+    prefSel.innerHTML = '<option value="">すべて</option>';
+    if (!region) return;
+    const res = await fetch('/api/prefectures?region=' + encodeURIComponent(region));
+    for (const p of await res.json()) {
+      const opt = document.createElement('option');
+      opt.value = p; opt.textContent = p;
+      prefSel.appendChild(opt);
+    }
+  });
+</script>
+{% endblock %}

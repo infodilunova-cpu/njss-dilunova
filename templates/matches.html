@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}マッチ案件 — {{ brand.brand_title }}{% endblock %}
+
+{% block content %}
+<div class="topbar"><h1>マッチ案件</h1></div>
+
+{% if not has_profile %}
+  <div class="empty">
+    まず <a href="{{ url_for('profile') }}">マイ条件</a> で対応エリア（都道府県）を登録してください。<br>
+    登録した条件に合う案件だけをここに表示します。
+  </div>
+{% else %}
+  <p class="lead">
+    マイ条件（{{ prof.prefectures.replace(',', '・') }}／{{ prof.categories }}{% if prof.budget_max %}／予算 {{ prof.budget_max }}円以下{% endif %}）に合致した案件です。
+    <a href="{{ url_for('profile') }}">条件を変更</a>
+  </p>
+  <div class="result-head"><span class="count">{{ rows|length }} 件</span> <span class="muted">が条件に一致</span></div>
+
+  {% if rows %}
+  <div class="case-list">
+    {% for c in rows %}
+    <a class="case-row" href="{{ url_for('case_detail', case_id=c.id) }}">
+      <div class="cr-main">
+        <div class="cr-title">{{ c.title }}</div>
+        <div class="cr-meta">
+          {% if c.announced_date and c.announced_date >= new_threshold %}<span class="tag new">新着</span>{% endif %}
+          <span class="cr-agency">{{ c.agency }}</span>
+          {% if c.prefecture %}<span class="tag region">{{ c.prefecture }}</span>{% endif %}
+          <span class="tag cat">{{ c.category }}</span>
+        </div>
+        <div class="cr-sub">
+          {% if c.bid_method %}<span><span class="lbl">入札方式</span>{{ c.bid_method }}</span>{% endif %}
+          {% if c.deadline %}<span class="deadline"><span class="lbl">締切</span>{{ c.deadline }}</span>{% endif %}
+          {% if c.budget %}<span class="price"><span class="lbl">予定価格</span>{{ c.budget }}</span>{% endif %}
+        </div>
+        <div class="match-reasons">
+          {% for r in c.match_reasons %}<span class="match-tag">{{ r }}</span>{% endfor %}
+        </div>
+      </div>
+      <div class="cr-side">
+        {% if c.spec_status == 'available' %}<span class="spec-pill ok">仕様書 取得可</span>
+        {% elif c.spec_status == 'unavailable' %}<span class="spec-pill ng">仕様書 取得不可</span>
+        {% else %}<span class="spec-pill unk">仕様書 未判定</span>{% endif %}
+      </div>
+    </a>
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="empty">条件に合う案件がまだありません。<a href="{{ url_for('profile') }}">対応エリアを増やす</a>と見つかりやすくなります。</p>
+  {% endif %}
+{% endif %}
+{% endblock %}

@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}競合企業 — {{ brand.brand_title }}{% endblock %}
+
+{% block content %}
+<div class="topbar"><h1>自社の競合企業</h1></div>
+{% if scoped %}
+  <p class="lead">
+    <strong>自社の対応エリア（{{ my_area | join('・') }}）</strong>で過去に落札している＝
+    あなたの競合になりうる企業を、落札件数順に表示しています{% if my_company %}（自社「{{ my_company }}」は除外）{% endif %}。
+    <a href="{{ url_for('competitors', all=1) }}">全国で見る →</a>
+  </p>
+{% else %}
+  <p class="lead">
+    全国の落札者を表示中。
+    <a href="{{ url_for('matches') if not my_area else url_for('competitors') }}">
+      {% if my_area %}自社エリアだけに戻す{% else %}マイ条件で対応エリアを登録{% endif %} →</a>
+    {% if not my_area %}すると「自社の競合」だけに絞り込めます。{% endif %}
+  </p>
+{% endif %}
+
+<form class="filterbar" method="get" action="{{ url_for('competitors') }}">
+  <label class="field grow">
+    <span>会社名</span>
+    <input type="text" name="q" value="{{ selected.q }}" placeholder="例: 電設 / 工業（表記ゆれを吸収）">
+  </label>
+  <label class="field">
+    <span>都道府県</span>
+    <select name="prefecture">
+      <option value="">すべて</option>
+      {% for pref in prefectures %}
+        <option value="{{ pref }}" {{ 'selected' if selected.prefecture == pref }}>{{ pref }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <div class="actions">
+    <button type="submit" class="btn primary">絞り込む</button>
+    <a class="btn" href="{{ url_for('competitors') }}">クリア</a>
+  </div>
+</form>
+
+<div class="result-head"><span class="count">{{ rows|length }} 社</span></div>
+
+{% if rows %}
+<table class="list">
+  <thead>
+    <tr><th>順位</th><th>企業名</th><th>落札件数</th><th>展開エリア</th><th>主な発注機関</th></tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+    <tr>
+      <td class="rank">{{ loop.index }}</td>
+      <td><a href="{{ url_for('competitor_detail', name=r.winner) }}">{{ r.winner }}</a></td>
+      <td><span class="win-badge">{{ r.wins }} 件</span></td>
+      <td>{{ r.prefectures.replace(',', ' / ') }}</td>
+      <td class="dim">{{ r.agencies.replace(',', '、') }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty">落札者データのある案件がありません。</p>
+{% endif %}
+{% endblock %}

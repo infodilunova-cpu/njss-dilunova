@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ brand.brand_title }}{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=10">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="logo">{{ brand.brand_logo }}</div>
+    <nav>
+      <a href="{{ url_for('cases') }}" class="{{ 'active' if nav_active == 'cases' }}">案件を探す</a>
+      <a href="{{ url_for('cases', open=1, budget_min=10000000, sort='budget') }}" class="{{ 'active' if nav_active == 'budget' }}">今応募できる1000万↑</a>
+      <a href="{{ url_for('cases', new=1) }}" class="{{ 'active' if nav_active == 'new' }}">新着</a>
+      <a href="{{ url_for('matches') }}" class="{{ 'active' if request.endpoint == 'matches' }}">マッチ案件</a>
+      <a href="{{ url_for('competitors') }}" class="{{ 'active' if request.endpoint in ['competitors','competitor_detail'] }}">競合企業</a>
+      <a href="{{ url_for('agencies') }}" class="{{ 'active' if request.endpoint == 'agencies' }}">監視機関</a>
+      <a href="{{ url_for('applications') }}" class="{{ 'active' if request.endpoint == 'applications' }}">申請管理</a>
+    </nav>
+    <div class="spacer"></div>
+    <nav>
+      <a href="{{ url_for('profile') }}" class="{{ 'active' if request.endpoint == 'profile' }}">マイ条件</a>
+    </nav>
+    <div class="side-foot">
+      {{ brand.brand_footer }}
+    </div>
+  </aside>
+
+  <main class="main">
+    {% if data_health and data_health.stale %}
+      <div class="flash error data-alert">
+        <strong>データに問題がある可能性があります</strong>：{{ data_health.stale_reason }}。
+        <span class="muted">（総件数 {{ '{:,}'.format(data_health.total) }}件／最新公告 {{ data_health.latest or '不明' }}）</span>
+      </div>
+    {% endif %}
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% for category, msg in messages %}
+        <div class="flash {{ category }}">{{ msg }}</div>
+      {% endfor %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+</div>
+{% block scripts %}{% endblock %}
+<script>window.__KAWANO_PROFILE_SET = {{ 'true' if profile_set else 'false' }};</script>
+<script>
+/* マイ条件のブラウザ保存→自動復元（無料ホストでディスクが揮発しても消えないように）。
+   サーバにマイ条件が無く、ブラウザ(localStorage)に有れば、サーバへ静かに復元する。 */
+(function () {
+  var KEY = 'kawanoProfile';
+  if (window.__KAWANO_PROFILE_SET) return;            // サーバに既にある＝復元不要
+  if (sessionStorage.getItem('kawanoRestored')) return; // 復元の無限ループ防止
+  var s = localStorage.getItem(KEY);
+  if (!s) return;
+  try {
+    var p = JSON.parse(s);
+    var hasPrefs = p && p.prefectures && p.prefectures.length;
+    var hasQuals = p && p.qualifications && p.qualifications.length;
+    if (!(hasPrefs || hasQuals)) return;
+    var b = new URLSearchParams();
+    b.append('company', p.company || '');
+    b.append('representative', p.representative || '');
+    b.append('address', p.address || '');
+    b.append('corp_number', p.corp_number || '');
+    (p.prefectures || []).forEach(function (v) { b.append('prefectures', v); });
+    (p.categories || []).forEach(function (v) { b.append('categories', v); });
+    b.append('categories_other', '');
+    (p.quals || []).forEach(function (v) { b.append('quals', v); });
+    b.append('quals_other', '');
+    b.append('budget_max', p.budget_max || '');
+    b.append('grade', p.grade || '');
+    b.append('qualifications', JSON.stringify(p.qualifications || []));
+    sessionStorage.setItem('kawanoRestored', '1');
+    fetch('/profile', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: b.toString(), redirect: 'manual' }).then(function () { location.reload(); });
+  } catch (e) {}
+})();
+</script>
+<script>
+/* 入札参加申請のブラウザ保存→自動復元。サーバDB(denki_bid.db)は毎日のデプロイで
+   丸ごと差し替わり申請が消えるため、localStorage を真の保存先とし、ロード時にサーバへ
+   静かに復元する。案件は external_id（再採番に強い安定キー）で解決する。 */
+(function () {
+  var KEY = 'kawanoApplications';
+  if (sessionStorage.getItem('kawanoAppsRestored')) return; // セッション内は1回だけ
+  var raw = localStorage.getItem(KEY);
+  if (!raw) return;
+  var map;
+  try { map = JSON.parse(raw) || {}; } catch (e) { return; }
+  var items = Object.keys(map).map(function (k) { return map[k]; })
+    .filter(function (a) { return a && a.external_id && a.status; });
+  if (!items.length) { sessionStorage.setItem('kawanoAppsRestored', '1'); return; }
+  fetch('/applications/restore', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items: items })
+  }).then(function (r) { return r.json(); }).then(function (d) {
+    sessionStorage.setItem('kawanoAppsRestored', '1');
+    var p = location.pathname;
+    // 申請が表示される画面で、実際に復元が入った時だけ1回だけ再描画する
+    if (d && d.restored > 0 && (p === '/applications' || p.indexOf('/case/') === 0)) {
+      location.reload();
+    }
+  }).catch(function () { sessionStorage.setItem('kawanoAppsRestored', '1'); });
+})();
+</script>
+<script>
+/* 監視機関の除外リスト（ホワイトリスト）をブラウザ保存→自動復元。
+   サーバDBは毎日のデプロイで揮発するため localStorage を真の保存先とする。 */
+(function () {
+  if (sessionStorage.getItem('kawanoAgcRestored')) return;
+  var raw = localStorage.getItem('kawanoAgencyExclusions');
+  if (!raw) return;
+  var list;
+  try { list = JSON.parse(raw) || []; } catch (e) { return; }
+  if (!list.length) { sessionStorage.setItem('kawanoAgcRestored', '1'); return; }
+  fetch('/agencies/exclusions/restore', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ excluded: list })
+  }).then(function (r) { return r.json(); }).then(function (d) {
+    sessionStorage.setItem('kawanoAgcRestored', '1');
+    var p = location.pathname;
+    if (d && d.restored > 0 && (p === '/' || p === '/agencies')) location.reload();
+  }).catch(function () { sessionStorage.setItem('kawanoAgcRestored', '1'); });
+})();
+</script>
+</body>
+</html>

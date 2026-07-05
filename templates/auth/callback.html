@@ -1,0 +1,28 @@
+{% extends "auth/_base.html" %}{% block t %}ログイン処理中{% endblock %}
+{% block body %}<div class="box">
+  <h1>ログイン処理中…</h1>
+  <p class="sub" id="msg">少しお待ちください。</p>
+</div>
+<script>
+/* Supabaseのimplicitフロー: access_token は URL の #fragment に入る。
+   それを拾ってサーバ(/auth/token)へ渡し、セッションを確立してトップへ。 */
+(function () {
+  function param(h, k) {
+    var m = new RegExp("[#&]" + k + "=([^&]+)").exec(h || "");
+    return m ? decodeURIComponent(m[1]) : "";
+  }
+  var token = param(location.hash, "access_token");
+  if (!token) {
+    document.getElementById("msg").textContent = "ログイン情報を取得できませんでした。もう一度お試しください。";
+    setTimeout(function () { location.href = "{{ url_for('auth.login') }}"; }, 1800);
+    return;
+  }
+  fetch("{{ url_for('auth.oauth_token') }}", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ access_token: token })
+  }).then(function (r) { return r.json(); }).then(function (d) {
+    location.href = d && d.ok ? "/" : "{{ url_for('auth.login') }}";
+  }).catch(function () { location.href = "{{ url_for('auth.login') }}"; });
+})();
+</script>
+{% endblock %}

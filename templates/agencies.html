@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}監視機関 — Kawanoさん NJSSモドキ{% endblock %}
+
+{% block content %}
+<div class="topbar"><h1>監視対象の発注機関（全国）</h1></div>
+<p class="lead">全国 {{ total }} の発注機関を監視対象として登録。<strong>左のチェックを外した機関は「案件を探す」に一切出さなくなります</strong>（応募対象外の機関を最初に排除）。既定は全機関ON。
+  {% if excluded_count %}<span class="muted">現在 {{ excluded_count }} 機関を除外中。</span>{% endif %}</p>
+
+<form class="filterbar" method="get" action="{{ url_for('agencies') }}">
+  <label class="field grow">
+    <span>機関名・ドメイン</span>
+    <input type="text" name="q" value="{{ q }}" placeholder="例: 県庁 / 防衛省 / e-aichi">
+  </label>
+  <div class="actions">
+    <button type="submit" class="btn primary">絞り込む</button>
+    <a class="btn" href="{{ url_for('agencies') }}">クリア</a>
+  </div>
+</form>
+
+<div class="result-head"><span class="count">{{ rows|length }} 機関</span></div>
+
+{% if rows %}
+<table class="list">
+  <thead>
+    <tr><th class="agc-col" title="案件を探すに出すか">表示</th><th>発注機関</th><th class="num">NJSS案件数</th><th>使用システム</th><th>公式入札ページ</th></tr>
+  </thead>
+  <tbody>
+    {% for r in rows %}
+    <tr class="{{ '' if r.included else 'agc-off' }}">
+      <td class="center"><input type="checkbox" class="agc" data-name="{{ r.name }}" {{ 'checked' if r.included }}></td>
+      <td class="title-cell">{{ r.name }}</td>
+      <td class="num">{{ r.njss_count }}</td>
+      <td><span class="tag">{{ r.platform }}</span>{% if r.platform_n > 1 %} <span class="dim">+{{ r.platform_n }}機関</span>{% endif %}</td>
+      <td>
+        {% if r.bid_url %}<a href="{{ r.bid_url }}" target="_blank" rel="noopener">入札ページを開く</a>{% else %}—{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="empty">監視機関が未登録です。<code>python agency_import.py</code> で取り込めます。</p>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+/* 監視機関のチェック＝ホワイトリスト。外した機関は「案件を探す」から除外。
+   サーバへトグル送信＋localStorageへ退避（揮発DB対策、base.html で自動復元）。 */
+(function () {
+  var KEY = 'kawanoAgencyExclusions';
+  function load() { try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch (e) { return []; } }
+  function save(list) { try { localStorage.setItem(KEY, JSON.stringify(list)); } catch (e) {} }
+  Array.prototype.forEach.call(document.querySelectorAll('.agc'), function (cb) {
+    cb.addEventListener('change', function () {
+      var name = cb.getAttribute('data-name');
+      var included = cb.checked;
+      cb.closest('tr').classList.toggle('agc-off', !included);
+      // localStorage を更新（除外名の配列）
+      var list = load();
+      var i = list.indexOf(name);
+      if (!included && i < 0) list.push(name);
+      if (included && i >= 0) list.splice(i, 1);
+      save(list);
+      // サーバへ反映
+      fetch('/agencies/toggle', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: name, included: included })
+      }).catch(function () {});
+    });
+  });
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}{{ name }} — 競合企業{% endblock %}
+
+{% block content %}
+<a class="back" href="{{ url_for('competitors') }}">← 競合企業一覧へ戻る</a>
+
+<div class="topbar"><h1>{{ name }}</h1></div>
+<p class="lead">落札実績 {{ cases|length }} 件</p>
+
+<table class="list">
+  <thead>
+    <tr><th>案件名</th><th>発注機関</th><th>地域</th><th>落札価格</th><th>公告日</th></tr>
+  </thead>
+  <tbody>
+    {% for c in cases %}
+    <tr>
+      <td><a href="{{ url_for('case_detail', case_id=c.id) }}">{{ c.title }}</a></td>
+      <td>{{ c.agency }}</td>
+      <td>{{ c.prefecture }}</td>
+      <td class="price">{{ c.win_price or '—' }}</td>
+      <td>{{ c.announced_date or '—' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

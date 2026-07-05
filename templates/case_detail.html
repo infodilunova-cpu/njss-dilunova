@@ -1,0 +1,412 @@
+{% extends "base.html" %}
+{% block title %}{{ c.title }} — {{ brand.brand_title }}{% endblock %}
+
+{% block content %}
+<a class="back" href="{{ url_for('cases') }}">← 一覧へ戻る</a>
+
+<article class="detail">
+  <div class="cc-top">
+    <span class="tag region">{{ c.region or '地方不明' }}</span>
+    <span class="tag">{{ c.prefecture }}</span>
+    <span class="tag cat">{{ c.category }}</span>
+  </div>
+  <h1>{{ c.title }}</h1>
+
+  <section class="spec-box {{ c.spec_status }}">
+    <h2>仕様書の取得可否</h2>
+    {% if c.spec_status == 'available' %}
+      <p class="spec-verdict ok">取得可能</p>
+      {% if c.spec_url and c.spec_url.startswith('http') and 'example.com' not in c.spec_url %}
+        <a class="btn primary" href="{{ c.spec_url }}" target="_blank" rel="noopener">仕様書をダウンロード</a>
+      {% else %}
+        <p class="reason">設計図書（仕様書）は下の「元の案件ページを開く」から発注機関のサイトで取得できます。</p>
+      {% endif %}
+    {% elif c.spec_status == 'unavailable' %}
+      <p class="spec-verdict ng">取得できません</p>
+      <p class="reason"><strong>理由:</strong> {{ spec_reasons.get(c.spec_reason, c.spec_reason or '不明') }}</p>
+    {% else %}
+      <p class="spec-verdict unk">未判定</p>
+      <p class="reason">設計図書の有無は「元の案件ページを開く」から発注機関のサイトでご確認ください。</p>
+    {% endif %}
+  </section>
+
+  <dl class="meta-list">
+    <dt>発注機関</dt><dd>{{ c.agency }}{% if c.agency_type %}（{{ c.agency_type }}）{% endif %}</dd>
+    <dt>地方 / 都道府県</dt><dd>{{ c.region }} / {{ c.prefecture }}</dd>
+    <dt>業種</dt><dd>{{ c.category }}</dd>
+    <dt>入札方式</dt><dd>{{ c.bid_method }}</dd>
+    <dt>公告日</dt><dd>{{ c.announced_date or '—' }}</dd>
+    <dt>申込締切</dt><dd>{{ c.deadline or '—' }}</dd>
+    {% if c.budget %}<dt>予定価格等</dt><dd>{{ c.budget }}</dd>{% endif %}
+    {% if c.winner %}
+      <dt>落札者（競合）</dt>
+      <dd><a class="link" href="{{ url_for('competitor_detail', name=c.winner) }}">{{ c.winner }}</a>
+        {% if c.win_price %}<span class="muted">／{{ c.win_price }}</span>{% endif %}</dd>
+    {% endif %}
+  </dl>
+
+  <div class="src-links">
+    {% if guide.notice_url %}
+      <a class="btn primary" href="{{ guide.notice_url }}" target="_blank" rel="noopener">この案件の公告を開く</a>
+    {% endif %}
+    <a class="btn ghost" href="{{ guide.notice_search_url }}" target="_blank" rel="noopener">この案件をウェブで探す</a>
+    {% if not guide.notice_url %}
+      <p class="src-note">※ この案件は元データに個別ページのリンクがなく、入札ポータルの検索画面にしか飛べません。上の「ウェブで探す」から発注機関の公告ページ（PDF等）を直接探せます。</p>
+    {% endif %}
+  </div>
+
+  <section class="ai-box" data-case-id="{{ c.id }}" data-cached="{{ '1' if ai_cached else '0' }}">
+    <h2>AI応募アシスト <span class="ai-tag">課金プラン</span></h2>
+    <p class="ai-lead">この案件の公告・必要書類・あなたのマイ条件をAIが読み込み、
+      <strong>応募の一歩手前</strong>（参加資格の適合判定・必要書類の具体化・やることリスト）まで一気に仕上げます。</p>
+    <button type="button" class="btn primary" id="aiRun">
+      {% if ai_cached %}AIの結果を見る{% else %}AIで応募準備をする{% endif %}
+    </button>
+    <div id="aiResult" class="ai-result" hidden></div>
+  </section>
+
+  <section class="guide-box">
+    <h2>応募ガイド — この案件に入札するには</h2>
+
+    <div class="guide-step">
+      <h3>1. まず公告を読む（応募条件・締切・提出先がここに載っています）</h3>
+      {% if guide.notice_url %}
+        <p>この案件の公告に、参加資格・提出書類・締切・問い合わせ先・入札方法が記載されています。</p>
+        <a class="btn primary small" href="{{ guide.notice_url }}" target="_blank" rel="noopener">この案件の公告を開く</a>
+      {% else %}
+        <p>この案件は元データに直接リンクがありません。下のボタンから公告ページを探してください。</p>
+        <a class="btn primary small" href="{{ guide.notice_search_url }}" target="_blank" rel="noopener">公告をウェブで探す</a>
+      {% endif %}
+    </div>
+
+    <div class="guide-step">
+      <h3>2. 電子入札システムに登録する（入札参加資格）</h3>
+      {% if guide.portal %}
+        <p>この発注機関は <strong>{{ guide.portal[0] }}</strong> を使っています。{{ guide.portal[2] }}</p>
+        <a class="btn primary small" href="{{ guide.portal[1] }}" target="_blank" rel="noopener">{{ guide.portal[0] }}を開く</a>
+        <a class="btn ghost small" href="{{ guide.register_search }}" target="_blank" rel="noopener">登録方法を調べる</a>
+      {% else %}
+        <p>{{ (requirements.steps | selectattr('title', 'equalto', '入札参加資格を登録する（指名願い／資格審査）') | first).body | safe }}</p>
+        <a class="btn primary small" href="{{ guide.register_search }}" target="_blank" rel="noopener">この機関の入札参加資格 登録方法を調べる</a>
+      {% endif %}
+    </div>
+
+    <div class="guide-step">
+      <h3>3. 必要書類を準備する</h3>
+      <p>この案件（{{ requirements.procurement_kind }}{% if c.category %}・{{ c.category }}{% endif %}）で一般的に必要となる書類:</p>
+      <ul class="checklist">
+        {% for d in requirements.documents %}
+          <li>
+            <label>
+              <input type="checkbox"> {{ d.label }}
+              {% if d.required %}<span class="badge req">必須</span>{% else %}<span class="badge opt">任意</span>{% endif %}
+            </label>
+            {% if d.note %}<p class="doc-note">{{ d.note }}</p>{% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+      {% for n in requirements.notes %}
+        <p class="tip">{{ n }}</p>
+      {% endfor %}
+    </div>
+
+    <div class="guide-step">
+      <h3>4. 設計図書（仕様書）を入手する</h3>
+      {% if guide.spec_url %}
+        <p>この案件の仕様書は上部の「仕様書をダウンロード」から取得できます。</p>
+      {% elif guide.notice_url %}
+        <p>上の「この案件の公告を開く」から設計図書の入手方法を確認してください。窓口配布・郵送・ダウンロードのいずれかです。</p>
+      {% else %}
+        <p>「この案件をウェブで探す」から公告ページを開き、設計図書の配布方法をご確認ください。</p>
+      {% endif %}
+    </div>
+
+    <div class="guide-step">
+      <h3>5. 入札する</h3>
+      <p>{% if c.bid_method %}この案件は「<strong>{{ c.bid_method }}</strong>」です。{% endif %}{% if c.deadline %}申込締切は <strong>{{ c.deadline }}</strong> です。{% endif %}</p>
+      <ul class="guide-flow">
+        <li>公告を確認し、参加資格を満たしているか確認</li>
+        <li>必要に応じて質問書を提出（質問期限に注意）</li>
+        <li>設計図書をもとに積算・見積を作成</li>
+        <li>電子入札システムで入札書を提出</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="apply-box">
+    <h2>入札参加申請の管理</h2>
+    {% if application %}
+      <p class="cur-status">
+        現在の状況:
+        <span class="status-badge {{ status_class.get(application.status, '') }}">{{ application.status }}</span>
+        {% if application.assignee %}<span class="muted">／担当 {{ application.assignee }}</span>{% endif %}
+        {% if application.needs_check %}<span class="badge req">要確認</span>{% endif %}
+      </p>
+      <p class="muted small">
+        {% if application.eff_apply_deadline %}参加申請 {{ application.eff_apply_deadline }}{% if application.apply_days is not none %}（{% if application.apply_days < 0 %}期限切れ{% elif application.apply_days == 0 %}本日{% else %}あと{{ application.apply_days }}日{% endif %}）{% endif %}{% endif %}
+        {% if application.bid_deadline %}｜入札書 {{ application.bid_deadline }}{% if application.bid_days is not none %}（{% if application.bid_days < 0 %}期限切れ{% elif application.bid_days == 0 %}本日{% else %}あと{{ application.bid_days }}日{% endif %}）{% endif %}{% endif %}
+        {% if application.submit_method %}｜提出 {{ application.submit_method }}{% endif %}
+      </p>
+      {% if application.partners %}
+        <p class="muted small">協力会社：依頼{{ application.partners | length }}社 / 回答{{ application.partner_replied }}</p>
+      {% endif %}
+      {% if application.note %}<p class="note">メモ: {{ application.note }}</p>{% endif %}
+    {% else %}
+      <p class="muted">まだ管理に登録されていません。</p>
+    {% endif %}
+
+    <form class="apply-form grid" method="post" action="{{ url_for('apply_case', case_id=c.id) }}"
+          data-ext="{{ c.external_id }}">
+      <label>
+        <span>状況</span>
+        <select name="status">
+          {% for s in app_statuses %}
+            <option value="{{ s }}" {{ 'selected' if application and application.status == s }}>{{ s }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        <span>担当者</span>
+        <input type="text" name="assignee" value="{{ application.assignee if application else '' }}" placeholder="社長 / 金子さん 等">
+      </label>
+      <label>
+        <span>提出方法</span>
+        <select name="submit_method">
+          <option value="">—</option>
+          {% for m in submit_methods %}
+            <option value="{{ m }}" {{ 'selected' if application and application.submit_method == m }}>{{ m }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        <span>申請日</span>
+        <input type="date" name="applied_date" value="{{ application.applied_date if application else '' }}">
+      </label>
+      <label>
+        <span>参加申請 期限</span>
+        <input type="date" name="apply_deadline" value="{{ application.apply_deadline if application else '' }}">
+      </label>
+      <label>
+        <span>入札書提出 期限</span>
+        <input type="date" name="bid_deadline" value="{{ application.bid_deadline if application else '' }}">
+      </label>
+      <label class="grow">
+        <span>メモ</span>
+        <textarea name="note" rows="3" class="note-area" placeholder="必要書類・注意点など">{{ application.note if application else '' }}</textarea>
+      </label>
+      <label class="check inline">
+        <input type="checkbox" name="needs_check" value="1" {{ 'checked' if application and application.needs_check }}>
+        <span>要確認フラグ</span>
+      </label>
+
+      <div class="partners full" id="partners">
+        <div class="partners-head">
+          <span>協力会社の見積</span>
+          <button type="button" class="btn ghost small" id="partnerAdd">＋ 協力会社を追加</button>
+        </div>
+        <table class="list partners-table">
+          <thead>
+            <tr><th>会社名</th><th>見積金額</th><th>依頼</th><th>回答</th><th>備考</th><th></th></tr>
+          </thead>
+          <tbody id="partnerRows"></tbody>
+        </table>
+      </div>
+
+      <input type="hidden" name="partners" id="partnersInput" value="[]">
+      <input type="hidden" name="managed" value="status,assignee,submit_method,applied_date,apply_deadline,bid_deadline,note,needs_check,partners">
+      <div class="full"><button type="submit" class="btn primary">保存</button></div>
+    </form>
+  </section>
+</article>
+{% endblock %}
+
+{% block scripts %}
+<script id="initialPartners" type="application/json">{{ (application.partners if application else []) | tojson }}</script>
+<script>
+/* 協力会社の見積を行として動的に編集する。送信時にJSON化して hidden(#partnersInput) に詰める。
+   1案件に複数社を登録し、各社 {company, amount, requested, replied, note} を持つ。 */
+(function () {
+  var tbody = document.getElementById('partnerRows');
+  var addBtn = document.getElementById('partnerAdd');
+  if (!tbody || !addBtn) return;
+  var esc = function (s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : s); return d.innerHTML; };
+
+  function addRow(p) {
+    p = p || {};
+    var tr = document.createElement('tr');
+    tr.className = 'p-row';
+    tr.innerHTML =
+      '<td><input class="p-company" type="text" placeholder="株式会社○○" value="' + esc(p.company) + '"></td>' +
+      '<td><input class="p-amount" type="text" placeholder="260万 等" value="' + esc(p.amount) + '"></td>' +
+      '<td class="center"><input class="p-requested" type="checkbox" ' + (p.requested ? 'checked' : '') + '></td>' +
+      '<td class="center"><input class="p-replied" type="checkbox" ' + (p.replied ? 'checked' : '') + '></td>' +
+      '<td><input class="p-note" type="text" placeholder="備考" value="' + esc(p.note) + '"></td>' +
+      '<td class="center"><button type="button" class="btn ghost small p-del">削除</button></td>';
+    tr.querySelector('.p-del').addEventListener('click', function () { tr.remove(); });
+    tbody.appendChild(tr);
+  }
+
+  function collect() {
+    return Array.prototype.map.call(tbody.querySelectorAll('.p-row'), function (tr) {
+      return {
+        company: tr.querySelector('.p-company').value.trim(),
+        amount: tr.querySelector('.p-amount').value.trim(),
+        requested: tr.querySelector('.p-requested').checked ? 1 : 0,
+        replied: tr.querySelector('.p-replied').checked ? 1 : 0,
+        note: tr.querySelector('.p-note').value.trim()
+      };
+    }).filter(function (p) { return p.company; });
+  }
+  window.__collectPartners = collect;
+
+  var initial = [];
+  try { initial = JSON.parse(document.getElementById('initialPartners').textContent) || []; } catch (e) {}
+  initial.forEach(addRow);
+  addBtn.addEventListener('click', function () { addRow(); });
+})();
+</script>
+<script>
+/* 申請の保存をブラウザ(localStorage)にも控える。サーバDBは毎日のデプロイで揮発するため、
+   localStorage を真の保存先とし、case の external_id（安定キー）で管理する。
+   通常のPOSTはそのまま走らせ、画面遷移前に静かにミラー保存するだけ。 */
+(function () {
+  var form = document.querySelector('.apply-form');
+  if (!form) return;
+  var ext = form.getAttribute('data-ext');
+  if (!ext) return;
+  function val(name) {
+    var el = form.querySelector('[name="' + name + '"]');
+    return el ? el.value : '';
+  }
+  form.addEventListener('submit', function () {
+    var partners = window.__collectPartners ? window.__collectPartners() : [];
+    var input = document.getElementById('partnersInput');
+    if (input) input.value = JSON.stringify(partners);  // サーバ送信用
+
+    var KEY = 'kawanoApplications';
+    var map;
+    try { map = JSON.parse(localStorage.getItem(KEY)) || {}; } catch (e) { map = {}; }
+    map[ext] = {
+      external_id: ext,
+      status: val('status'),
+      applied_date: val('applied_date'),
+      note: val('note'),
+      assignee: val('assignee'),
+      apply_deadline: val('apply_deadline'),
+      bid_deadline: val('bid_deadline'),
+      submit_method: val('submit_method'),
+      needs_check: form.querySelector('[name="needs_check"]').checked ? 1 : 0,
+      partners: partners
+    };
+    try { localStorage.setItem(KEY, JSON.stringify(map)); } catch (e) {}
+  });
+})();
+</script>
+
+<script>
+/* AI応募アシスト（オンデマンド）。タップした時だけサーバ経由でClaudeを1回呼ぶ。
+   結果はサーバにキャッシュされ、再タップでは課金されない。 */
+(function () {
+  var box = document.querySelector('.ai-box');
+  if (!box) return;
+  var btn = document.getElementById('aiRun');
+  var out = document.getElementById('aiResult');
+  var caseId = box.getAttribute('data-case-id');
+  var esc = function (s) {
+    var d = document.createElement('div'); d.textContent = (s == null ? '' : s); return d.innerHTML;
+  };
+  var ul = function (items) {
+    return '<ul>' + (items || []).map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>';
+  };
+  function render(d) {
+    if (d.enabled === false) {
+      out.innerHTML = '<p class="ai-note">この機能は<strong>課金プラン</strong>で有効化されます'
+        + '（管理者がAPIキーを設定すると使えます）。</p>';
+      return;
+    }
+    if (d.error) {
+      out.innerHTML = '<p class="ai-note">AIの生成に失敗しました。時間をおいて再度お試しください。<br>'
+        + '<span class="muted">' + esc(d.error) + '</span></p>';
+      return;
+    }
+    var elig = d.eligibility || {};
+    var verdictClass = ({ '〇': 'ok', '△': 'warn', '✕': 'ng' })[elig.verdict] || 'unk';
+    var html = '';
+    html += '<div class="ai-block"><h3>要点</h3>' + ul(d.summary) + '</div>';
+    html += '<div class="ai-block"><h3>参加資格の適合</h3>'
+      + '<p><span class="ai-verdict ' + verdictClass + '">' + esc(elig.verdict || '不明') + '</span></p>'
+      + ul(elig.reasons);
+    // ✕（または△/不明）→ ワンタップでNGリストへ。〇 → そのまま申請管理に保存。
+    if (elig.verdict === '〇') {
+      html += '<div class="ai-ng"><button type="button" class="btn ok-btn" id="aiOkBtn">この案件を申請管理に保存する</button>'
+        + '<span class="muted small"> 申請管理に登録し、AI判定の根拠をメモに残します</span></div>';
+    } else if (elig.verdict) {
+      html += '<div class="ai-ng"><button type="button" class="btn ng-btn" id="aiNgBtn">このままNGリストへ入れる（理由つき）</button>'
+        + '<span class="muted small"> 申請管理のNG列へ移動し、足りなかった点をメモに残します</span></div>';
+    }
+    html += '</div>';
+    html += '<div class="ai-block"><h3>必要書類（この案件向け）</h3>' + ul(d.documents) + '</div>';
+    html += '<div class="ai-block"><h3>やること（応募一歩手前まで）</h3><ol>'
+      + (d.todo || []).map(function (t) {
+          return '<li><strong>' + esc(t.title) + '</strong>'
+            + (t.detail ? '<br><span class="muted">' + esc(t.detail) + '</span>' : '') + '</li>';
+        }).join('') + '</ol></div>';
+    if (d.cautions && d.cautions.length) {
+      html += '<div class="ai-block"><h3>注意点</h3>' + ul(d.cautions) + '</div>';
+    }
+    html += '<p class="ai-foot muted">'
+      + 'AIで出した結果です。最終確認は必ず公告原本で行ってください。'
+      + ' <a href="#" id="aiRefresh">再生成</a></p>';
+    out.innerHTML = html;
+    var rf = document.getElementById('aiRefresh');
+    if (rf) rf.addEventListener('click', function (e) { e.preventDefault(); run(true); });
+    var ng = document.getElementById('aiNgBtn');
+    if (ng) ng.addEventListener('click', function () {
+      var reasons = (elig.reasons || []);
+      var memo = '【AI判定: 参加不可】' + (reasons.length ? reasons.join(' / ') : 'AIが参加資格を満たさないと判定');
+      var form = document.querySelector('.apply-form');
+      if (!form) { alert('申請フォームが見つかりません'); return; }
+      var st = form.querySelector('[name="status"]'); if (st) st.value = 'NG';
+      var note = form.querySelector('[name="note"]');
+      if (note) note.value = memo + (note.value ? ' ／ ' + note.value : '');
+      var nx = document.createElement('input');
+      nx.type = 'hidden'; nx.name = 'next'; nx.value = '/applications';  // 保存後はNG列を見せる
+      form.appendChild(nx);
+      ng.disabled = true; ng.textContent = 'NGへ登録中…';
+      if (typeof form.requestSubmit === 'function') form.requestSubmit(); else form.submit();
+    });
+    var ok = document.getElementById('aiOkBtn');
+    if (ok) ok.addEventListener('click', function () {
+      var reasons = (elig.reasons || []);
+      var memo = '【AI判定: 参加可】' + (reasons.length ? reasons.join(' / ') : 'AIが参加資格を満たすと判定');
+      var form = document.querySelector('.apply-form');
+      if (!form) { alert('申請フォームが見つかりません'); return; }
+      // 状況はフォームの現在値を尊重（NGにはしない。未登録なら既定の「参加申請準備前」で保存）
+      var note = form.querySelector('[name="note"]');
+      if (note) note.value = memo + (note.value ? ' ／ ' + note.value : '');
+      var nx = document.createElement('input');
+      nx.type = 'hidden'; nx.name = 'next'; nx.value = '/applications';
+      form.appendChild(nx);
+      ok.disabled = true; ok.textContent = '保存中…';
+      if (typeof form.requestSubmit === 'function') form.requestSubmit(); else form.submit();
+    });
+  }
+  function run(refresh) {
+    out.hidden = false;
+    out.innerHTML = '<div class="ai-loading">'
+      + '<div class="ai-loading-msg">AIが公告と必要書類を読み込んでいます'
+      + '<span class="ai-dots"><i>.</i><i>.</i><i>.</i></span></div>'
+      + '<div class="ai-bar"></div>'
+      + '<div class="ai-loading-sub">10〜30秒ほどかかります。そのままお待ちください。</div></div>';
+    btn.disabled = true;
+    var url = '/case/' + caseId + '/ai-assist' + (refresh ? '?refresh=1' : '');
+    fetch(url, { method: 'POST' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { render(d); })
+      .catch(function () { out.innerHTML = '<p class="ai-note">通信に失敗しました。再度お試しください。</p>'; })
+      .finally(function () { btn.disabled = false; });
+  }
+  btn.addEventListener('click', function () { run(false); });
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,13 @@
+# 本番Web（デプロイ）に必要な依存。これだけで動く＝無料ホストで軽量・低コスト。
+# 【重要】毎日リビルドされるため、将来の自動アップグレードで突然壊れないよう
+#        バージョンを固定する（==）。更新は意図的に行うこと。
+Flask==3.1.3
+Werkzeug==3.1.8
+Jinja2==3.1.6
+itsdangerous==2.2.0
+click==8.4.1
+MarkupSafe==3.0.3
+gunicorn==26.0.0
+# AIアシストが公告PDF全文を読むためのフォールバック（pure-python・poppler不要）
+pypdf==6.1.3
+psycopg2-binary

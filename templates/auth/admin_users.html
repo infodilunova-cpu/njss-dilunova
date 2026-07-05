@@ -1,0 +1,26 @@
+{% extends "auth/_base.html" %}{% block t %}アカウント管理{% endblock %}
+{% block body %}<div class="box wide">
+  <h1>アカウント管理（AIモード権限）</h1>
+  <p class="sub">各アカウントが AI応募アシスト（課金プラン）を使えるかを管理します。</p>
+  {% with ms=get_flashed_messages(with_categories=true) %}{% for c,m in ms %}<div class="flash {{c}}">{{m}}</div>{% endfor %}{% endwith %}
+  <table><thead><tr><th>メール</th><th>AIモード</th><th>管理者</th><th>操作</th></tr></thead><tbody>
+  {% for u in users %}
+    <tr>
+      <td>{{ u.email }}</td>
+      <td>{{ '許可' if u.ai_enabled else '不可' }}</td>
+      <td>{{ '○' if u.is_admin else '' }}</td>
+      <td>
+        <form method="post" style="margin:0">
+          <input type="hidden" name="email" value="{{ u.email }}">
+          {% if u.ai_enabled %}
+            <button name="ai_enabled" value="off" style="width:auto;margin:0;background:#dc2626;padding:6px 12px">AIを取消</button>
+          {% else %}
+            <button name="ai_enabled" value="on" style="width:auto;margin:0;padding:6px 12px">AIを許可</button>
+          {% endif %}
+        </form>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody></table>
+  <p class="alt"><a href="/">← アプリへ戻る</a></p>
+</div>{% endblock %}

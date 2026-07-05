@@ -1,0 +1,33 @@
+# Render.com 無料プランでのデプロイ定義（ランニングコスト0円）。
+# Render に GitHub リポジトリを接続すれば、この設定で自動デプロイされる。
+# 無料プランは一定時間アクセスが無いとスリープ（コールドスタート）。料金はかからない。
+services:
+  - type: web
+    name: njss-dilunova
+    runtime: python
+    plan: free
+    # ① 依存導入 → ② 回帰テスト(AI不使用・ネット不要、壊れてたらデプロイ中止)
+    # → ③ GitHub Actionsが生成した網羅DB(全国・推定5〜10万件)をダウンロード。
+    #    失敗時のみ軽量取得(--fast)にフォールバック＝必ずDBが用意される。すべて自動・無料。
+    buildCommand: pip install -r requirements.txt && python test_procurement.py && python test_kkj.py && (python fetch_db.py || python update.py --fast)
+    # 無料プランは1インスタンス。--workers 1 で省メモリ、--timeout 60 でコールドスタート時の
+    # ワーカー強制終了（既定30秒）を防ぐ。
+    startCommand: gunicorn wsgi:app --bind 0.0.0.0:$PORT --workers 1 --timeout 60
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: FLASK_DEBUG
+        value: "0"
+      # Python を固定（将来のデフォルト更新で挙動が変わらないように）
+      - key: PYTHON_VERSION
+        value: "3.13.5"
+      # AI応募アシスト(Gemini)用。値は秘密なのでコードに書かず、Renderダッシュボードの
+      # Environment で設定する（sync:false＝Blueprintから値を同期しない＝手入力）。
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: "gemini-2.5-flash"
+      # GitHub Actions(--full)が公開する網羅DB(電気＋web業種)のReleaseアセットURL。
+      # このリポのReleaseを指す。未設定/失敗時はビルドが update.py --fast にフォールバック。
+      - key: DB_RELEASE_URL
+        sync: false
