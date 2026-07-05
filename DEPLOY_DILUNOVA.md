@@ -22,14 +22,14 @@ GitHub + Render + GitHub Actions で無料デプロイするための手順。
 
 ## 手順
 
-### 1. GitHubリポジトリを作成して push
+### 1. GitHubリポジトリを作成して push（private 構成）
 ```bash
 cd ~/NJSS無双君/NJSS_DiluNova
-# 例: DiluNova社アカウント配下に公開リポジトリを作成（fetch_dbが認証不要でDLするため public 推奨）
-gh repo create infodilunova-cpu/njss-dilunova --public --source=. --remote=origin --push
+gh repo create infodilunova-cpu/njss-dilunova --private --source=. --remote=origin --push
 ```
-> `fetch_db.py` は Release アセットを **未認証の HTTP** でDLする。private にする場合は
-> ダウンロードを認証付きに変えるか、Renderのビルドを `update.py --full` 直実行に切り替える。
+> **private の場合**、`fetch_db.py` は Release アセットを GitHub API 経由で **認証DL** する。
+> Render に `GH_TOKEN`(repo読取PAT) と `GH_REPO`(owner/repo) を設定すること（手順3）。
+> public にするなら `--public` にして、Renderには `DB_RELEASE_URL`(直リンク)だけ設定すればよい。
 
 ### 2. 網羅DBを初回生成（Releaseを用意）
 Renderが最初のデプロイでDBを取得できるよう、先にActionsを1回走らせてReleaseを作る。
@@ -43,13 +43,16 @@ gh release view data-latest -R infodilunova-cpu/njss-dilunova
 ### 3. Render にサービスを作成
 - Render ダッシュボード → New → Blueprint → リポジトリ `njss-dilunova` を選択
   （`render.yaml` を自動検出。service名 `njss-dilunova`）
-- **Environment 変数**を設定:
+- **Environment 変数**を設定（**private リポ**なので認証DL）:
   | Key | Value |
   |---|---|
-  | `DB_RELEASE_URL` | `https://github.com/infodilunova-cpu/njss-dilunova/releases/download/data-latest/denki_bid.db.gz` |
+  | `GH_TOKEN` | repo読取権のある Personal Access Token（`gh auth token` か GitHub設定で発行・**秘密**） |
+  | `GH_REPO` | `infodilunova-cpu/njss-dilunova` |
+  | `GH_RELEASE_TAG` | `data-latest`（render.yamlで既定投入済） |
   | `GEMINI_API_KEY` | （AI応募アシストを使う場合のみ・任意） |
   | `AUTH_REQUIRED` | ログイン強制するなら `1`（既定0=無認証で閲覧可） |
   | `SUPABASE_URL` / `SUPABASE_ANON_KEY` | Supabase Auth（Google含む）を使う場合のみ |
+  > public リポにした場合はこの3つの代わりに `DB_RELEASE_URL`（Releaseアセット直リンク）を設定。
 - `SECRET_KEY`・`FLASK_DEBUG`・`PYTHON_VERSION` は `render.yaml` が自動投入。
 
 ### 4. 動作確認

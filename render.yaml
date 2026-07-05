@@ -27,7 +27,16 @@ services:
         sync: false
       - key: GEMINI_MODEL
         value: "gemini-2.5-flash"
-      # GitHub Actions(--full)が公開する網羅DB(電気＋web業種)のReleaseアセットURL。
-      # このリポのReleaseを指す。未設定/失敗時はビルドが update.py --fast にフォールバック。
+      # --- 網羅DB(電気＋web業種)の取得元。GitHub Actions(--full)がReleaseに公開する ---
+      # 【public リポの場合】直リンクを未認証DL。DB_RELEASE_URL だけ設定すればよい。
       - key: DB_RELEASE_URL
         sync: false
+      # 【private リポの場合】GitHub API 経由で認証DL。以下3つを設定（DB_RELEASE_URLは不要）。
+      #   GH_TOKEN: repo読取権のある Personal Access Token（Renderに手入力・秘密）
+      #   GH_REPO : owner/repo（例 infodilunova-cpu/njss-dilunova）
+      - key: GH_TOKEN
+        sync: false
+      - key: GH_REPO
+        sync: false
+      - key: GH_RELEASE_TAG
+        value: "data-latest"
