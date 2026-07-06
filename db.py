@@ -388,8 +388,13 @@ def _build_case_filter(
         # 締切が判明していて、かつ今日以降のものだけ＝実際に応募できる案件
         where.append("deadline != '' AND deadline >= date('now', 'localtime')")
     if hide_closed:
-        # 締切が過去のもの＝終了を隠す。締切不明('')や今後分は残す。
-        where.append("(deadline = '' OR deadline >= date('now', 'localtime'))")
+        # 終了(締切が過去)を隠す＝「募集中」タブ。
+        # 締切未定('')は "公告45日以内の新しいものだけ" 残す。古い未定案件は実質終了で
+        # あることが多く、募集中に大量に紛れて一覧をガバガバにするため除外する。
+        where.append(
+            "(deadline >= date('now', 'localtime') "
+            "OR (deadline = '' AND announced_date >= date('now', 'localtime', '-45 days')))"
+        )
     if announced_after:
         # 新着フィルタ（公告日がこの日以降）。SQL側で行うことで件数も正確・上限の影響を受けない。
         where.append("announced_date != '' AND announced_date >= ?")
