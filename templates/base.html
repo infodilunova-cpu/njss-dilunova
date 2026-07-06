@@ -10,6 +10,13 @@
 <div class="app">
   <aside class="sidebar">
     <div class="logo">{{ brand.brand_logo }}</div>
+    {# 業種トグル（未ログインでも電気⇄Webを切替。ログイン中はアカウントの業種が優先） #}
+    <div style="display:flex;gap:6px;margin:10px 0 14px;flex-wrap:wrap">
+      {% for vid, v in verticals_all.items() %}
+      <a href="{{ url_for('cases', vertical=vid) }}"
+         style="flex:1 1 40%;text-align:center;padding:6px 4px;border-radius:8px;font-size:12px;font-weight:600;text-decoration:none;{{ 'background:#2563eb;color:#fff' if vertical == vid else 'background:#eef2f7;color:#334155' }}">{{ v.label }}</a>
+      {% endfor %}
+    </div>
     <nav>
       <a href="{{ url_for('cases') }}" class="{{ 'active' if nav_active == 'cases' }}">案件を探す</a>
       <a href="{{ url_for('cases', open=1, budget_min=10000000, sort='budget') }}" class="{{ 'active' if nav_active == 'budget' }}">今応募できる1000万↑</a>

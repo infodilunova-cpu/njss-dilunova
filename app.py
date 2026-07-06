@@ -18,7 +18,7 @@ import logging
 import os
 from datetime import date, timedelta
 
-from flask import Flask, abort, flash, jsonify, redirect, render_template, request, url_for
+from flask import Flask, abort, flash, jsonify, redirect, render_template, request, session, url_for
 
 import db
 import procurement
@@ -29,12 +29,24 @@ from regions import ALL_PREFECTURES, REGIONS, prefectures_in
 
 
 def current_vertical() -> str:
-    """このリクエストの業種テンプレ。ログイン中はそのアカウントの業種、
-    未ログインなら環境変数 DEFAULT_VERTICAL（無ければ既定）。"""
+    """このリクエストの業種テンプレ。ログイン中はそのアカウントの業種を最優先。
+    未ログインは ?vertical= で切替可（sessionに保持し以降のページでも維持）、
+    無ければ環境変数 DEFAULT_VERTICAL（さらに無ければ既定）。"""
     try:
         u = auth.current_user()
         if u and u.get("vertical") in verticals.VERTICALS:
             return u["vertical"]
+    except Exception:  # noqa: BLE001
+        pass
+    # 未ログイン：業種トグル(?vertical=)での切替に対応。選んだ業種はsessionで維持。
+    try:
+        v = (request.args.get("vertical") or "").strip()
+        if v in verticals.VERTICALS:
+            session["vertical"] = v
+            return v
+        sv = session.get("vertical")
+        if sv in verticals.VERTICALS:
+            return sv
     except Exception:  # noqa: BLE001
         pass
     return os.environ.get("DEFAULT_VERTICAL", verticals.DEFAULT_VERTICAL)
@@ -150,7 +162,8 @@ def inject_current_user():
 def inject_vertical():
     """業種テンプレのブランディング（タイトル/ロゴ/footer）を全テンプレへ供給。"""
     vt = current_vertical()
-    return {"vertical": vt, "brand": verticals.get(vt)}
+    return {"vertical": vt, "brand": verticals.get(vt),
+            "verticals_all": verticals.VERTICALS}
 
 
 @app.context_processor
