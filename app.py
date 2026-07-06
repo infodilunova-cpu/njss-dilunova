@@ -273,8 +273,8 @@ def cases():
         announced_after=announced_after,
         # 監視機関でチェックを外した発注機関の案件は最初から除外する
         exclude_agencies=db.list_agency_exclusions(),
-        # このアカウント/設定の業種だけ表示
-        vertical=current_vertical(),
+        # 業種で分けず全件を統合表示（電気＋Web＋…を1つの盤面で横断検索）
+        vertical=None,
     )
     matched = db.count_list_cases(**filters)          # 該当件数（上限なしの実数）
     total_pages = max(1, (matched + per_page - 1) // per_page)
@@ -295,7 +295,7 @@ def cases():
 
     # 画面の文脈ヘッダー（どの絞り込みで見ているかを一目で分かるように）。
     # サイドバーのどの項目を選んでいるか（nav_active）も併せて決める。
-    _vlabel = verticals.get(current_vertical())["label"]  # 業種名（電気工事 / Web・制作 …）
+    _vlabel = ""  # 業種で分けず全件統合表示のため、文言に業種名は入れない（→「案件」）
     if budget_min > 0:
         man = f"{budget_min // 10000:,}"
         view = {
