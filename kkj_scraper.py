@@ -292,6 +292,23 @@ _CATEGORY_RULES: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 
+_ALL_RULES_CACHE: list | None = None
+
+
+def _all_category_rules() -> list:
+    """全業種の分類ルール＝denki(工事全トレード＋電気)＋web(IT)を合体（結果はキャッシュ）。"""
+    global _ALL_RULES_CACHE
+    if _ALL_RULES_CACHE is None:
+        try:
+            import verticals as _v
+            d = list(_v.get("denki").get("category_rules") or [])
+            w = list(_v.get("web").get("category_rules") or [])
+            _ALL_RULES_CACHE = d + w
+        except Exception:  # noqa: BLE001
+            _ALL_RULES_CACHE = list(_CATEGORY_RULES)
+    return _ALL_RULES_CACHE
+
+
 def classify_category(text: str, title: str = "", vertical: str | None = None) -> str:
     """案件名(+説明)から業種を判定する（業種テンプレの分類ルールを使用・タイトル優先）。
 
@@ -302,7 +319,11 @@ def classify_category(text: str, title: str = "", vertical: str | None = None) -
         return "その他"
     rules = _CATEGORY_RULES
     title_only = False
-    if vertical:
+    if vertical == "all":
+        # 全業種統合：電気(denki)＝建築/電気/清掃/警備/土木ほか全トレード＋web(IT)の
+        # 分類ルールを合体して使う。denki を先にして工事系のタイ勝ちを優先。
+        rules = _all_category_rules()
+    elif vertical:
         try:
             import verticals as _v
             cfg = _v.get(vertical)
@@ -374,7 +395,9 @@ def fetch(query: str = "電気工事", category: str = "2",
             "region": region_of(pref) or "",
             "prefecture": pref,
             "category": classify_category(desc, title=title, vertical=vertical),
-            "vertical": vertical or "denki",
+            # 業種列は denki/web のみ（"all" 等の分類用の値はそのまま格納しない）。
+            # 統合ブラウズは vertical で絞らないので既定 denki で問題ない。
+            "vertical": vertical if vertical in ("denki", "web") else "denki",
             "procurement_type": _PROC_TYPE.get(category, ""),
             "bid_method": _PROC.get(_text(sr, "ProcedureType"), _text(sr, "ProcedureType")),
             "announced_date": announced,
@@ -542,6 +565,52 @@ def fetch_comprehensive() -> list[dict]:
     for code in KANSAI_CODES:
         specs += [(q, "3", [code]) for q in SERVICE_QUERIES]
     return _fetch_many(specs, max_workers=10)
+
+
+# ---- 全業種（統合版）向けの広範クエリ ------------------------------------
+# DiluNova は業種で分けず全案件を統合表示する方針のため、電気/webに限らず
+# 工事(Cat2)・役務(Cat3)・物品(Cat1)を全業種で広く取る。分類は classify_category
+# (vertical=None=_CATEGORY_RULES)が全業種の category へ振り分ける。
+ALL_CONSTRUCTION_QUERIES = (  # Cat2 工事：全トレード
+    "建築", "土木", "電気工事", "管工事", "舗装", "塗装", "防水", "解体",
+    "造園", "設備", "改修", "補修", "機械", "通信", "消防", "受変電",
+    "照明", "太陽光", "空調", "給排水",
+)
+ALL_SERVICE_QUERIES = (  # Cat3 役務：全サービス（IT/web含む）
+    "業務委託", "保守", "点検", "清掃", "警備", "運搬", "設計", "調査",
+    "印刷", "運営", "管理", "保安", "システム", "開発", "ホームページ",
+    "賃貸借", "廃棄物", "給食", "検査", "研修", "翻訳", "映像", "広報", "運送",
+)
+ALL_GOODS_QUERIES = (  # Cat1 物品
+    "購入", "物品", "備品", "機器", "車両", "消耗品", "図書", "医療",
+    "食料", "燃料",
+)
+
+
+def fetch_all_industries() -> list[dict]:
+    """【全業種 網羅モード】全47都道府県 × 工事/役務/物品の広範クエリで取得する。
+
+    業種で分けず全案件を1つのDBに集約する統合方針のためのソース。電気・IT も
+    このクエリ群に含まれる（電気工事/受変電/照明/システム/ホームページ 等）。
+    vertical=None で classify_category が _CATEGORY_RULES により全業種へ分類する。
+    呼び出し数が多い(約2,500)ので GitHub Actions もしくはローカルで実行する。
+    """
+    all_codes = list(PREF_CODE.values())
+    specs: list[tuple[str, str, list[str] | None]] = []
+    for code in all_codes:
+        specs += [(q, "2", [code]) for q in ALL_CONSTRUCTION_QUERIES]
+        specs += [(q, "3", [code]) for q in ALL_SERVICE_QUERIES]
+        specs += [(q, "1", [code]) for q in ALL_GOODS_QUERIES]
+    # vertical="all" → denki+web 合体ルールで全業種分類。
+    rows = _fetch_many(specs, max_workers=10, vertical="all")
+    # DB肥大＆陳腐化の防止：広範クエリは2021年〜の古い案件を大量に返すため、
+    # 「締切が今日以降」または「公告が直近90日以内」の案件だけ残す（古い終了案件は捨てる）。
+    from datetime import date, timedelta
+    today = date.today().isoformat()
+    cutoff = (date.today() - timedelta(days=90)).isoformat()
+    return [r for r in rows
+            if (r.get("deadline") or "") >= today
+            or (r.get("announced_date") or "") >= cutoff]
 
 
 # 後方互換エイリアス（update.py 等の既存呼び出し用）

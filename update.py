@@ -47,18 +47,12 @@ def run(reset: bool = False, koukai_instances: list[str] | None = None,
     import kkj_scraper
     try:
         if full:
-            # 網羅モード：全都道府県分割で上限(1000/クエリ)を突破して取りこぼしを無くす
-            rows = kkj_scraper.fetch_comprehensive()  # 電気工事(denki)
-            # web業種（ホームページ制作／システム開発ほかIT・Web全般）も47都道府県分割で
-            # 取り切る。分類が"その他"（非IT）の案件はノイズなので捨てる。
-            # vertical列で分離されるので denki と同一DBに共存できる。
-            try:
-                web_rows = [r for r in kkj_scraper.fetch_for_vertical("web", per_pref=True)
-                            if r.get("title") and r.get("category") != "その他"]
-                print(f"[web業種 網羅] {len(web_rows)} 件（都道府県分割・その他除外）")
-                rows += web_rows
-            except Exception as e:  # noqa: BLE001
-                print(f"[web業種 網羅] 取得失敗（電気分のみで続行）: {str(e)[:70]}")
+            # 【全業種統合 網羅モード】全47都道府県 × 工事(Cat2)/役務(Cat3)/物品(Cat1)の
+            # 広範クエリで取得。電気・IT・建築・清掃・警備・物品…全業種を1つのDBに集約する
+            # （DiluNovaは業種で分けず統合表示する方針）。分類は denki+web 合体ルールで全業種へ。
+            # 生きてる案件＋直近90日公告に絞り込み済＝古い終了案件は入らずDBが肥大しない。
+            rows = kkj_scraper.fetch_all_industries()
+            print(f"[全業種 網羅] {len(rows)} 件（全国・全業種・生存/直近90日）")
         else:
             # 関西は電気の工事＋役務を横断で厚く取る（役務=保安管理/保守点検の取りこぼし防止）
             rows = kkj_scraper.fetch_kansai_electrical()
