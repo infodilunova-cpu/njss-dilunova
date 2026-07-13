@@ -150,9 +150,12 @@ def _row_to_case(cols: list[str]) -> dict | None:
     if not item_no or not title or not winner:
         return None
 
-    category = kkj_scraper.classify_category(title, title=title)
-    if not kkj_scraper.is_electrical(category):
-        return None  # 電気工事系のみ採用（"電気の購入"等の小売電力契約は除外）
+    # 全業種で分類（DiluNovaは業種統合）。旧: is_electrical()で電気のみ通していたが、
+    # DiluNova版のis_electricalは常にFalseのため全件棄却＝落札実績が0件になっていた。
+    # 分類ルールに当たらない「その他」（大半が汎用物品購入）だけ除外してノイズを抑える。
+    category = kkj_scraper.classify_category(title, title=title, vertical="all")
+    if category == "その他":
+        return None
 
     ministry_cd = (cols[_COL_MINISTRY] or "").strip()
     method_cd = (cols[_COL_METHOD] or "").strip()
