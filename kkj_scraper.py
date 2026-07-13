@@ -358,11 +358,19 @@ def is_electrical(category: str) -> bool:
 
 def fetch(query: str = "電気工事", category: str = "2",
           lg_codes: list[str] | None = None, count: int = 1000,
-          timeout: int = 40, vertical: str | None = None) -> list[dict]:
-    """官公需APIを叩いて案件の生 dict リストを返す。vertical で業種分類＆タグ付け。"""
+          timeout: int = 40, vertical: str | None = None,
+          issue_date: str | None = None) -> list[dict]:
+    """官公需APIを叩いて案件の生 dict リストを返す。vertical で業種分類＆タグ付け。
+
+    issue_date: 公告日の期間指定（API の CFT_Issue_Date、"YYYY-MM-DD/" =以降、
+    "/YYYY-MM-DD" =以前、"開始/終了" =範囲）。ヒットが1000件超のクエリでは
+    未指定だと古い案件が枠を食い潰し新しい案件を取りこぼすため、網羅取得では必ず指定する。
+    """
     params = {"Query": query, "Category": category, "Count": str(count)}
     if lg_codes:
         params["LG_Code"] = ",".join(lg_codes)
+    if issue_date:
+        params["CFT_Issue_Date"] = issue_date
     url = API_URL + "?" + urllib.parse.urlencode(params, encoding="utf-8")
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=timeout) as res:
@@ -457,7 +465,8 @@ ELEC_SERVICE_QUERIES = (
 
 def _fetch_retry(query: str, category: str,
                  lg_codes: list[str] | None = None,
-                 retries: int = 2, vertical: str | None = None) -> list[dict]:
+                 retries: int = 2, vertical: str | None = None,
+                 issue_date: str | None = None) -> list[dict]:
     """fetch() の薄いリトライ版。タイムアウト/DNS瞬断を retries 回まで再試行。
 
     1クエリの一過性失敗で取りこぼさないための保険。最終的に失敗したら [] を返す。
@@ -465,7 +474,8 @@ def _fetch_retry(query: str, category: str,
     import time
     for attempt in range(retries + 1):
         try:
-            return fetch(query=query, category=category, lg_codes=lg_codes, vertical=vertical)
+            return fetch(query=query, category=category, lg_codes=lg_codes,
+                         vertical=vertical, issue_date=issue_date)
         except Exception:  # noqa: BLE001 — 一過性のネットワーク失敗を再試行
             if attempt < retries:
                 time.sleep(2 * (attempt + 1))
@@ -475,7 +485,8 @@ def _fetch_retry(query: str, category: str,
 
 def _fetch_many(specs: list[tuple[str, str, list[str] | None]],
                 max_workers: int = 8, vertical: str | None = None,
-                checkpoint: str | None = None) -> list[dict]:
+                checkpoint: str | None = None,
+                issue_date: str | None = None) -> list[dict]:
     """(query, category, lg_codes) のリストを並列取得し external_id で一意化して返す。
 
     各クエリは独立かつ I/O 待ちが大半なので、スレッドプールで同時実行する。
@@ -518,7 +529,8 @@ def _fetch_many(specs: list[tuple[str, str, list[str] | None]],
     try:
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
             results = ex.map(
-                lambda s: (s, _fetch_retry(query=s[0], category=s[1], lg_codes=s[2], vertical=vertical)),
+                lambda s: (s, _fetch_retry(query=s[0], category=s[1], lg_codes=s[2],
+                                           vertical=vertical, issue_date=issue_date)),
                 todo)
             for spec, rows in results:
                 done += 1
@@ -671,8 +683,15 @@ def fetch_all_industries() -> list[dict]:
     vertical=None で classify_category が _CATEGORY_RULES により全業種へ分類する。
     IT・Web系（ホームページ制作/ソフトウェア開発/インフラ/AI等）は ALL_IT_QUERIES で
     専用語を都道府県分割にかけ、汎用語では拾えない案件も全部引っ張る。
+
+    【重要】公告日フィルタ（CFT_Issue_Date=直近180日）をAPI側にかける。
+    未指定だと全期間（2021年〜）がヒットし、1000件/クエリの枠を古い終了案件が
+    食い潰して新しい案件を大量に取りこぼす（例:「ホームページ」は全期間35,604件
+    ヒットで直近90日2,556件がほぼ枠外だった）。180日にするのは、公告から締切まで
+    数ヶ月ある長期案件（今も申し込める）を拾うため。
     呼び出し数が多い(約4,300)ので GitHub Actions もしくはローカルで実行する。
     """
+    from datetime import date, timedelta
     all_codes = list(PREF_CODE.values())
     specs: list[tuple[str, str, list[str] | None]] = []
     for code in all_codes:
@@ -681,19 +700,20 @@ def fetch_all_industries() -> list[dict]:
         specs += [(q, "3", [code]) for q in ALL_IT_QUERIES]
         specs += [(q, "1", [code]) for q in ALL_GOODS_QUERIES]
         specs += [(q, "1", [code]) for q in ALL_IT_GOODS_QUERIES]
+    since = (date.today() - timedelta(days=180)).isoformat() + "/"
     # vertical="all" → denki+web 合体ルールで全業種分類。
     # checkpoint: 数時間かかるため、中断されても続きから再開できるよう逐次保存する。
     # 完走したら消す（翌日以降の実行に古いデータを持ち越さない）。
     import os
     ck = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".kkj_checkpoint.jsonl")
-    rows = _fetch_many(specs, max_workers=14, vertical="all", checkpoint=ck)
+    rows = _fetch_many(specs, max_workers=14, vertical="all", checkpoint=ck,
+                       issue_date=since)
     try:
         os.remove(ck)
     except OSError:
         pass
-    # DB肥大＆陳腐化の防止：広範クエリは2021年〜の古い案件を大量に返すため、
-    # 「締切が今日以降」または「公告が直近90日以内」の案件だけ残す（古い終了案件は捨てる）。
-    from datetime import date, timedelta
+    # DB肥大＆陳腐化の防止：「締切が今日以降（＝申し込める）」または
+    # 「公告が直近90日以内（＝新しい）」の案件だけ残す（古い終了案件は捨てる）。
     today = date.today().isoformat()
     cutoff = (date.today() - timedelta(days=90)).isoformat()
     return [r for r in rows

@@ -29,7 +29,7 @@ def _install_fake_fetch(monkeypatch_target):
     calls: list[tuple] = []
 
     def fake_fetch(query="電気工事", category="2", lg_codes=None, count=1000, timeout=40,
-                   vertical=None):
+                   vertical=None, issue_date=None):
         calls.append((query, category, tuple(lg_codes) if lg_codes else None))
         # クエリ名で一意な1件＋全クエリ共通の重複1件（dedup効果を見るため）
         return [
@@ -78,7 +78,7 @@ def test_fetch_retry_recovers_from_transient_error():
         state = {"n": 0}
 
         def flaky(query="", category="2", lg_codes=None, count=1000, timeout=40,
-                  vertical=None):
+                  vertical=None, issue_date=None):
             state["n"] += 1
             if state["n"] == 1:
                 raise TimeoutError("一過性")
