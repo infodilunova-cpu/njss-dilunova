@@ -292,20 +292,26 @@ _CATEGORY_RULES: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 
-_ALL_RULES_CACHE: list | None = None
+_ALL_RULES_CACHE: tuple | None = None
 
 
-def _all_category_rules() -> list:
-    """全業種の分類ルール＝denki(工事全トレード＋電気)＋web(IT)を合体（結果はキャッシュ）。"""
+def _all_category_rules() -> tuple:
+    """全業種の分類ルールを (タイトル用, 説明文用) で返す（結果はキャッシュ）。
+
+    タイトル用＝denki(工事全トレード＋電気)＋web(IT)の合体。
+    説明文用＝denkiのみ。web(IT)ルールは title_only 設計（説明文には
+    「詳細は市ホームページを参照」等の定型文が頻出し、無関係の工事案件まで
+    ホームページ制作等に誤分類するため、説明文スキャンには使わない）。
+    """
     global _ALL_RULES_CACHE
     if _ALL_RULES_CACHE is None:
         try:
             import verticals as _v
             d = list(_v.get("denki").get("category_rules") or [])
             w = list(_v.get("web").get("category_rules") or [])
-            _ALL_RULES_CACHE = d + w
+            _ALL_RULES_CACHE = (d + w, d)
         except Exception:  # noqa: BLE001
-            _ALL_RULES_CACHE = list(_CATEGORY_RULES)
+            _ALL_RULES_CACHE = (list(_CATEGORY_RULES), list(_CATEGORY_RULES))
     return _ALL_RULES_CACHE
 
 
@@ -318,11 +324,13 @@ def classify_category(text: str, title: str = "", vertical: str | None = None) -
     if not text and not title:
         return "その他"
     rules = _CATEGORY_RULES
+    desc_rules = None  # 説明文パス専用ルール（None なら rules と同じ）
     title_only = False
     if vertical == "all":
         # 全業種統合：電気(denki)＝建築/電気/清掃/警備/土木ほか全トレード＋web(IT)の
         # 分類ルールを合体して使う。denki を先にして工事系のタイ勝ちを優先。
-        rules = _all_category_rules()
+        # 説明文パスは denki ルールのみ（web は title_only 設計）。
+        rules, desc_rules = _all_category_rules()
     elif vertical:
         try:
             import verticals as _v
@@ -337,8 +345,8 @@ def classify_category(text: str, title: str = "", vertical: str | None = None) -
             return name
     if title_only:                       # 説明文ノイズが多い業種はタイトルのみで判定
         return "その他"
-    for name, keywords in rules:        # 2) 中立なら説明文も見る
-        if any(k in text for k in keywords):
+    for name, keywords in (desc_rules if desc_rules is not None else rules):
+        if any(k in text for k in keywords):  # 2) 中立なら説明文も見る
             return name
     return "その他"
 
@@ -466,22 +474,67 @@ def _fetch_retry(query: str, category: str,
 
 
 def _fetch_many(specs: list[tuple[str, str, list[str] | None]],
-                max_workers: int = 8, vertical: str | None = None) -> list[dict]:
+                max_workers: int = 8, vertical: str | None = None,
+                checkpoint: str | None = None) -> list[dict]:
     """(query, category, lg_codes) のリストを並列取得し external_id で一意化して返す。
 
     各クエリは独立かつ I/O 待ちが大半なので、スレッドプールで同時実行する。
     逐次だと全国20クエリ×数十秒＝10分超でRenderのビルド時間を超過しデプロイ失敗していた。
     並列化で数分に短縮する。失敗クエリは _fetch_retry が [] を返すので全体は止まらない。
+
+    checkpoint にファイルパスを渡すと、完了したクエリの結果を JSONL で逐次保存し、
+    中断後の再実行では保存済みクエリをスキップして続きから再開する（数千クエリ×
+    数時間の網羅取得がプロセス強制終了で丸ごと無駄になるのを防ぐ）。
+    ※失敗して [] になったクエリも「完了」と記録される（再開時に再試行しない）。
     """
+    import json
+    import os
     from concurrent.futures import ThreadPoolExecutor
 
+    def _key(s: tuple) -> str:
+        return f"{s[0]}|{s[1]}|{','.join(s[2] or [])}"
+
     seen: dict[str, dict] = {}
-    with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        results = ex.map(lambda s: _fetch_retry(query=s[0], category=s[1], lg_codes=s[2], vertical=vertical), specs)
-        for rows in results:
-            for r in rows:
-                if r.get("title") and r["external_id"] not in seen:
-                    seen[r["external_id"]] = r
+    done_keys: set[str] = set()
+    ck_file = None
+    if checkpoint:
+        if os.path.exists(checkpoint):
+            with open(checkpoint, encoding="utf-8") as f:
+                for line in f:
+                    try:
+                        rec = json.loads(line)
+                    except Exception:  # noqa: BLE001 — 途中killで欠けた最終行は捨てる
+                        continue
+                    done_keys.add(rec["k"])
+                    for r in rec["rows"]:
+                        if r.get("title") and r["external_id"] not in seen:
+                            seen[r["external_id"]] = r
+            print(f"  [checkpoint] 既取得 {len(done_keys)} クエリを再利用"
+                  f"（累計 {len(seen)} 件から再開）", flush=True)
+        ck_file = open(checkpoint, "a", encoding="utf-8")
+
+    todo = [s for s in specs if _key(s) not in done_keys]
+    done = 0
+    try:
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            results = ex.map(
+                lambda s: (s, _fetch_retry(query=s[0], category=s[1], lg_codes=s[2], vertical=vertical)),
+                todo)
+            for spec, rows in results:
+                done += 1
+                if done % 200 == 0:  # 長時間の網羅取得でも進捗が見えるように
+                    print(f"  …{done}/{len(todo)} クエリ完了・累計 {len(seen)} 件", flush=True)
+                if ck_file:
+                    ck_file.write(json.dumps({"k": _key(spec), "rows": rows},
+                                             ensure_ascii=False) + "\n")
+                    if done % 20 == 0:
+                        ck_file.flush()
+                for r in rows:
+                    if r.get("title") and r["external_id"] not in seen:
+                        seen[r["external_id"]] = r
+    finally:
+        if ck_file:
+            ck_file.close()
     return list(seen.values())
 
 
@@ -585,6 +638,29 @@ ALL_GOODS_QUERIES = (  # Cat1 物品
     "購入", "物品", "備品", "機器", "車両", "消耗品", "図書", "医療",
     "食料", "燃料",
 )
+# IT・Web系の役務(Cat3)クエリ＝ホームページ制作/ソフトウェア開発/インフラ/デジタル系を
+# 全部引っ張るための専用語。ALL_SERVICE_QUERIES の「システム/開発/ホームページ」だけでは
+# タイトルにその語を含まない案件（例:「公式ウェブサイト構築」「CMS更新」「RPA導入支援」）を
+# 丸ごと取りこぼすため、部分一致で他語に含まれない語を1語ずつ押さえる。
+ALL_IT_QUERIES = (  # Cat3 役務
+    # Web・ホームページ（「サイト」が ○○サイト構築/制作/リニューアルを一括で拾う）
+    "ウェブ", "Web", "サイト", "CMS", "ランディングページ",
+    # 開発・ソフトウェア（「システム/開発」で拾えない単独語）
+    "アプリ", "ソフトウェア", "プログラム",
+    # デジタル・DX トレンド
+    "デジタル", "DX", "ICT", "オンライン", "電子", "マイナンバー", "スマートシティ",
+    # AI・データ活用
+    "AI", "RPA", "チャットボット", "GIS", "データ", "OCR",
+    # インフラ・セキュリティ
+    "クラウド", "サーバ", "ネットワーク", "セキュリティ", "LAN", "GIGA",
+    # 運用・サポート
+    "ヘルプデスク", "コールセンター",
+    # クリエイティブ・マーケ（Web周辺。印刷/映像/広報は ALL_SERVICE_QUERIES 側にあり）
+    "動画", "デザイン", "コンテンツ", "SNS",
+)
+ALL_IT_GOODS_QUERIES = (  # Cat1 物品：IT機器・ソフトウェア調達
+    "パソコン", "タブレット", "サーバ", "ソフトウェア", "ライセンス", "端末",
+)
 
 
 def fetch_all_industries() -> list[dict]:
@@ -593,16 +669,28 @@ def fetch_all_industries() -> list[dict]:
     業種で分けず全案件を1つのDBに集約する統合方針のためのソース。電気・IT も
     このクエリ群に含まれる（電気工事/受変電/照明/システム/ホームページ 等）。
     vertical=None で classify_category が _CATEGORY_RULES により全業種へ分類する。
-    呼び出し数が多い(約2,500)ので GitHub Actions もしくはローカルで実行する。
+    IT・Web系（ホームページ制作/ソフトウェア開発/インフラ/AI等）は ALL_IT_QUERIES で
+    専用語を都道府県分割にかけ、汎用語では拾えない案件も全部引っ張る。
+    呼び出し数が多い(約4,300)ので GitHub Actions もしくはローカルで実行する。
     """
     all_codes = list(PREF_CODE.values())
     specs: list[tuple[str, str, list[str] | None]] = []
     for code in all_codes:
         specs += [(q, "2", [code]) for q in ALL_CONSTRUCTION_QUERIES]
         specs += [(q, "3", [code]) for q in ALL_SERVICE_QUERIES]
+        specs += [(q, "3", [code]) for q in ALL_IT_QUERIES]
         specs += [(q, "1", [code]) for q in ALL_GOODS_QUERIES]
+        specs += [(q, "1", [code]) for q in ALL_IT_GOODS_QUERIES]
     # vertical="all" → denki+web 合体ルールで全業種分類。
-    rows = _fetch_many(specs, max_workers=10, vertical="all")
+    # checkpoint: 数時間かかるため、中断されても続きから再開できるよう逐次保存する。
+    # 完走したら消す（翌日以降の実行に古いデータを持ち越さない）。
+    import os
+    ck = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".kkj_checkpoint.jsonl")
+    rows = _fetch_many(specs, max_workers=14, vertical="all", checkpoint=ck)
+    try:
+        os.remove(ck)
+    except OSError:
+        pass
     # DB肥大＆陳腐化の防止：広範クエリは2021年〜の古い案件を大量に返すため、
     # 「締切が今日以降」または「公告が直近90日以内」の案件だけ残す（古い終了案件は捨てる）。
     from datetime import date, timedelta

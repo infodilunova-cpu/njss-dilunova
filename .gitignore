@@ -27,3 +27,4 @@ set_render_env.sh
 newscreen/
 応募ターゲット_*.csv
 応募準備_*.md
+.kkj_checkpoint.jsonl
