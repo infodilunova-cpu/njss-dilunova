@@ -83,6 +83,45 @@ def run(reset: bool = False, koukai_instances: list[str] | None = None,
         print(f"[官公需API] 失敗・既存データ維持: {str(e)[:70]}")
 
     if fast or full:
+        # 0a-0) 自治体・PPIの個別システム（Playwright必須。PLAYWRIGHT_SOURCES=1 の時だけ）。
+        #       GitHub Actions で chromium を入れて有効化する。京都(efftis)/愛知(e-Aichi)/
+        #       堺市・明石(PPUBC)/茨城(電子入札コアシステム)/PPI(国の機関・落札者つき)の
+        #       5系統＝官公需APIに載らない自治体の生公告と競合(落札者)を足す。
+        import os as _os
+        if full and _os.environ.get("PLAYWRIGHT_SOURCES") == "1":
+            for mod_name, label in [("kyoto_scraper", "京都府"),
+                                    ("aichi_scraper", "愛知県(e-Aichi)")]:
+                try:
+                    n = __import__(mod_name).load()
+                    print(f"[{label}] {n} 件")
+                except Exception as e:  # noqa: BLE001
+                    print(f"[{label}] 取得失敗（スキップ）: {str(e)[:70]}")
+            try:
+                import ppubc_scraper
+                for inst in ppubc_scraper.INSTANCES:
+                    try:
+                        print(f"[{inst}(PPUBC)] {ppubc_scraper.load(inst)} 件")
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[{inst}(PPUBC)] 取得失敗: {str(e)[:60]}")
+            except Exception as e:  # noqa: BLE001
+                print(f"[PPUBC] 読込失敗: {str(e)[:60]}")
+            try:
+                import koukai_scraper
+                print(f"[茨城県(入札情報公開)] {koukai_scraper.load('茨城県', count='100', max_pages=2)} 件")
+            except Exception as e:  # noqa: BLE001
+                print(f"[茨城県] 取得失敗（スキップ）: {str(e)[:70]}")
+            for dist in ["北海道", "東北", "関東", "北陸", "中部", "近畿",
+                         "中国", "四国", "九州・沖縄"]:
+                try:
+                    rows_ppi = ppi_scraper.fetch_live(
+                        keika=True, kikan="国の機関", district=dist,
+                        koji_kbn="電気設備工事", count="100",
+                        with_winner=True, max_detail=4)
+                    norm = [ppi_scraper._normalize(r) for r in rows_ppi]
+                    print(f"[PPI {dist}] {db.upsert_cases(norm) if norm else 0} 件")
+                except Exception as e:  # noqa: BLE001
+                    print(f"[PPI {dist}] 取得失敗（スキップ）: {str(e)[:60]}")
+
         # 0a) 東京都電子調達（SP版JSON API・HTTPのみ）。官公需APIの東京都庁カバーは
         #     384件しかなく、都の実発注（常時800件超）が最大の穴だったため直接取得。
         #     取得0件時は既存行を維持（load側でガード済み）。
@@ -111,7 +150,8 @@ def run(reset: bool = False, koukai_instances: list[str] | None = None,
         try:
             import agency_import
             n_ag = agency_import.load()
-            print(f"[監視機関リスト] {n_ag} 機関")
+            n_ex = agency_import.load_extra()
+            print(f"[監視機関リスト] {n_ag} 機関＋NJSS元機関リスト {n_ex} 機関")
             if n_ag == 0:
                 # 致命ではない（案件は出る）が、応募ガイドのポータル判定や監視機関ページが
                 # 空になるためビルドログで気付けるよう目立たせる。スプシ非公開化が典型原因。

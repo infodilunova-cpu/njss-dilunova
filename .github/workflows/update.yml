@@ -15,7 +15,7 @@ permissions:
 jobs:
   build-and-publish-db:
     runs-on: ubuntu-latest
-    timeout-minutes: 150   # 全業種＋IT専用クエリ(約4,300呼出・都道府県分割)の網羅取得ぶん
+    timeout-minutes: 240   # 官公需365日窓(約4,300呼出)＋Playwright自治体5系統＋落札実績ぶん
     steps:
       - uses: actions/checkout@v4
 
@@ -26,10 +26,15 @@ jobs:
       - name: 依存導入
         run: pip install -r requirements.txt
 
+      - name: Playwright導入（自治体・PPIスクレイパー用）
+        run: pip install playwright && python -m playwright install --with-deps chromium
+
       - name: 回帰テスト（壊れていたら中止）
         run: python test_procurement.py && python test_kkj.py && python test_tokyo.py && python test_awards.py
 
-      - name: 網羅DB生成（全国・都道府県分割）
+      - name: 網羅DB生成（全国・都道府県分割＋自治体個別システム）
+        env:
+          PLAYWRIGHT_SOURCES: "1"   # 京都/愛知/PPUBC/茨城/PPI(落札者つき)を有効化
         run: python update.py --full
 
       - name: PDF実照合でToDo精度を監査（PDCA・非ブロッキング）

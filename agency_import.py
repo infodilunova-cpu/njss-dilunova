@@ -93,6 +93,32 @@ def load() -> int:
     return db.upsert_agencies(rows) if rows else 0
 
 
+EXTRA_CSV = "research/njss_dokuho_agencies.csv"
+
+
+def load_extra(path: str = EXTRA_CSV) -> int:
+    """リポジトリ内CSVの追加監視機関を取り込む（スプシ既載の機関は上書きしない）。
+
+    CSVはNJSS「発注機関を探す」全9,041機関の公式サイト・調達ページを解決した成果物
+    （kawanoプロジェクトで構築・6,800機関超）。NJSS本体は叩かず、突き止めた一次
+    ソース（各機関の公式URL）だけを使う。
+    「既載」の判定はシート由来の行のみ。自分が過去に取り込んだ行
+    （sample_url がNJSS機関ページ）はCSVの最新値で毎回上書き更新する。
+    """
+    import os
+
+    if not os.path.exists(path):
+        return 0
+    db.init_db()
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        rows = [dict(r) for r in csv.DictReader(f)]
+    sheet_names = {a["name"] for a in db.list_agencies()
+                   if "organizations/proc/" not in (a.get("sample_url") or "")}
+    fresh = [r for r in rows if r.get("name") and r["name"] not in sheet_names]
+    return db.upsert_agencies(fresh) if fresh else 0
+
+
 if __name__ == "__main__":
     n = load()
-    print(f"監視対象の発注機関 {n} 件を取り込みました")
+    n2 = load_extra()
+    print(f"監視対象の発注機関 {n} 件＋NJSS元機関リスト {n2} 件を取り込みました")

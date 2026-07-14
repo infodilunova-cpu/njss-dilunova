@@ -700,7 +700,7 @@ def fetch_all_industries() -> list[dict]:
         specs += [(q, "3", [code]) for q in ALL_IT_QUERIES]
         specs += [(q, "1", [code]) for q in ALL_GOODS_QUERIES]
         specs += [(q, "1", [code]) for q in ALL_IT_GOODS_QUERIES]
-    since = (date.today() - timedelta(days=180)).isoformat() + "/"
+    since = (date.today() - timedelta(days=365)).isoformat() + "/"
     # vertical="all" → denki+web 合体ルールで全業種分類。
     # checkpoint: 数時間かかるため、中断されても続きから再開できるよう逐次保存する。
     # 完走したら消す（翌日以降の実行に古いデータを持ち越さない）。
@@ -713,12 +713,12 @@ def fetch_all_industries() -> list[dict]:
     except OSError:
         pass
     # DB肥大＆陳腐化の防止：「締切が今日以降（＝申し込める）」または
-    # 「公告が直近180日以内（＝取得ウィンドウと同じ）」の案件だけ残す。
-    # 180日の直近実績はホームページ制作等の希少カテゴリで発注機関リサーチの
-    # 材料になるため落とさない（新着HP案件はKKJ上そもそも少なく、90日で切ると
+    # 「公告が直近365日以内（＝取得ウィンドウと同じ）」の案件だけ残す。
+    # 直近1年の実績はホームページ制作等の希少カテゴリで発注機関リサーチの
+    # 材料になるため落とさない（新着HP案件はKKJ上そもそも少なく、短期で切ると
     # 港区議会HPリニューアル級の事例まで消えてカテゴリがほぼ空になる）。
     today = date.today().isoformat()
-    cutoff = (date.today() - timedelta(days=180)).isoformat()
+    cutoff = (date.today() - timedelta(days=365)).isoformat()
     return [r for r in rows
             if (r.get("deadline") or "") >= today
             or (r.get("announced_date") or "") >= cutoff]
