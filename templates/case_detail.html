@@ -12,6 +12,19 @@
   </div>
   <h1>{{ c.title }}</h1>
 
+  {# 終了案件は開いた瞬間に分かるように明示（締切が過去 or 落札者が確定済み） #}
+  {% set is_closed = (c.deadline and c.deadline < today) or (not c.deadline and c.winner) %}
+  {% if is_closed %}
+  <div class="closed-banner">
+    <strong>この案件は終了しています。</strong>
+    {% if c.deadline %}締切は {{ c.deadline }} でした。{% endif %}
+    {% if c.winner %}落札: {{ c.winner }}{% if c.win_price %}（{{ c.win_price }}）{% endif %}{% endif %}
+    現在は応募できません。発注実績・競合の参考情報としてご覧ください。
+  </div>
+  {% elif c.deadline %}
+  <div class="open-banner">応募できます — 締切 {{ c.deadline }}</div>
+  {% endif %}
+
   <section class="spec-box {{ c.spec_status }}">
     <h2>仕様書の取得可否</h2>
     {% if c.spec_status == 'available' %}

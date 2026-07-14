@@ -295,6 +295,13 @@ table.list .rank { font-weight: 600; color: var(--text-tertiary); text-align: ce
 /* ---- 詳細ページ ---- */
 .back { display: inline-block; margin-bottom: 14px; font-size: 13px; }
 .detail { max-width: 880px; }
+/* 終了/応募可の明示バナー（詳細ページ先頭）。終了案件は開いた瞬間に分かるように */
+.closed-banner { background: var(--bg-hover); color: var(--text-tertiary);
+  border: 1px solid var(--border-strong); border-left: 4px solid var(--text-tertiary);
+  border-radius: 8px; padding: 12px 14px; margin: 0 0 18px; }
+.closed-banner strong { color: var(--danger); }
+.open-banner { background: var(--success-soft); color: var(--success); font-weight: 700;
+  border-radius: 8px; padding: 10px 14px; margin: 0 0 18px; }
 .detail .cc-top { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .detail h1 { margin: 6px 0 18px; }
 .spec-box { border-radius: 10px; padding: 16px; margin-bottom: 18px; border: 1px solid var(--border); }

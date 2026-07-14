@@ -122,11 +122,14 @@
 {% if rows %}
 <div class="case-list">
   {% for c in rows %}
-  <a class="case-row {{ 'closed' if c.deadline and c.deadline < today }}" href="{{ url_for('case_detail', case_id=c.id) }}">
+  {# 終了＝締切が過去、または締切不明でも落札者が確定済み（落札実績データ） #}
+  {% set row_closed = (c.deadline and c.deadline < today) or (not c.deadline and c.winner) %}
+  <a class="case-row {{ 'closed' if row_closed }}" href="{{ url_for('case_detail', case_id=c.id) }}">
     <div class="cr-main">
       <div class="cr-title">{{ c.title }}</div>
       <div class="cr-meta">
-        {% if c.deadline and c.deadline < today %}<span class="tag ended">終了</span>{% endif %}
+        {% if c.deadline and c.deadline < today %}<span class="tag ended">終了</span>
+        {% elif row_closed %}<span class="tag ended">落札済み</span>{% endif %}
         {% if c.announced_date and c.announced_date == today %}<span class="tag today">本日</span>
         {% elif c.announced_date and c.announced_date >= new_threshold %}<span class="tag new">新着</span>{% endif %}
         {% if c.deadline and c.deadline >= today %}<span class="tag open">応募できる</span>{% endif %}

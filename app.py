@@ -368,6 +368,7 @@ def case_detail(case_id: int):
     return render_template(
         "case_detail.html",
         c=case,
+        today=date.today().isoformat(),
         spec_reasons=db.SPEC_REASONS,
         application=application,
         app_statuses=db.APP_STATUSES,
