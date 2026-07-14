@@ -15,7 +15,7 @@ permissions:
 jobs:
   build-and-publish-db:
     runs-on: ubuntu-latest
-    timeout-minutes: 240   # 官公需365日窓(約4,300呼出)＋Playwright自治体5系統＋落札実績ぶん
+    timeout-minutes: 300   # 官公需365日窓(約5,800呼出)＋Playwright自治体5系統＋落札実績ぶん
     steps:
       - uses: actions/checkout@v4
 
