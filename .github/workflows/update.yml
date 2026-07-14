@@ -1,0 +1,67 @@
+name: データ網羅更新（毎日）
+
+# 毎日 JST 6:00（UTC 21:00）に、全国を都道府県分割で網羅取得した完成DBを生成し、
+# GitHub Release "data-latest" にアップロード → タイムスタンプ push で Render を再デプロイ。
+# Render はその完成DBをダウンロードするだけ（重い取得はここ=Actionsで完結）。
+# Actions は無料・実行時間にゆとりがあるため、1000回規模のAPI取得もここで安全に回せる。
+on:
+  schedule:
+    - cron: "0 21 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # Release への書き込み＋タイムスタンプ push に必要
+
+jobs:
+  build-and-publish-db:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150   # 全業種＋IT専用クエリ(約4,300呼出・都道府県分割)の網羅取得ぶん
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 依存導入
+        run: pip install -r requirements.txt
+
+      - name: 回帰テスト（壊れていたら中止）
+        run: python test_procurement.py && python test_kkj.py
+
+      - name: 網羅DB生成（全国・都道府県分割）
+        run: python update.py --full
+
+      - name: PDF実照合でToDo精度を監査（PDCA・非ブロッキング）
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq poppler-utils
+          # 生成したToDo/必要書類が公告PDFの実態とズレていないかをサンプル照合。
+          # 失敗や低スコアでもデプロイは止めない（品質の可視化が目的）。ログで確認できる。
+          python audit.py --pdf 40 || echo "::warning::PDF実照合の整合率がしきい値未満、またはPDF監査に失敗（ログ参照）"
+
+      - name: DBを圧縮
+        run: gzip -9 -c denki_bid.db > denki_bid.db.gz && ls -lh denki_bid.db.gz
+
+      - name: Release "data-latest" に公開（上書き）
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 固定タグ data-latest が無ければ作成、あれば資産を差し替える
+          gh release view data-latest >/dev/null 2>&1 \
+            && gh release upload data-latest denki_bid.db.gz --clobber \
+            || gh release create data-latest denki_bid.db.gz \
+                 --title "最新データ（網羅版）" \
+                 --notes "update.py --full が生成した全国網羅DB。Renderがビルド時に取得。"
+
+      - name: Render 再デプロイをトリガー（API直叩き）
+        # RenderはこのリポジトリとGitHub App連携していないため、pushでは再デプロイされない。
+        # RENDER_API_KEY(リポジトリsecret)でデプロイAPIを直接叩く。
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        run: |
+          curl -fsS -X POST \
+            "https://api.render.com/v1/services/srv-d95lvg6q1p3s73d6rpsg/deploys" \
+            -H "Authorization: Bearer $RENDER_API_KEY" \
+            -H "Content-Type: application/json" -d '{}' \
+            | head -c 200
+          echo "\nRenderが再デプロイし、最新の網羅DBをダウンロードします"
