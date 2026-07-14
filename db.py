@@ -388,12 +388,15 @@ def _build_case_filter(
         # 締切が判明していて、かつ今日以降のものだけ＝実際に応募できる案件
         where.append("deadline != '' AND deadline >= date('now', 'localtime')")
     if hide_closed:
-        # 終了(締切が過去)を隠す＝「募集中」タブ。
-        # 締切未定('')は "公告45日以内の新しいものだけ" 残す。古い未定案件は実質終了で
-        # あることが多く、募集中に大量に紛れて一覧をガバガバにするため除外する。
+        # 終了(締切が過去)を隠す＝「募集中」タブ＝今申し込める案件だけを見せる。
+        # 締切未定('')は "落札者が未確定 かつ 公告45日以内の新しいものだけ" 残す。
+        # 古い未定案件は実質終了であることが多く、また落札者(winner)が入っている行は
+        # 落札実績＝結果データで応募できないため、締切未定でも必ず隠す
+        # （調達ポータル落札実績16,000件超が新着・一覧に紛れ込むのを防ぐ）。
         where.append(
             "(deadline >= date('now', 'localtime') "
-            "OR (deadline = '' AND announced_date >= date('now', 'localtime', '-45 days')))"
+            "OR (deadline = '' AND winner = '' "
+            "AND announced_date >= date('now', 'localtime', '-45 days')))"
         )
     if announced_after:
         # 新着フィルタ（公告日がこの日以降）。SQL側で行うことで件数も正確・上限の影響を受けない。
