@@ -83,6 +83,16 @@ def run(reset: bool = False, koukai_instances: list[str] | None = None,
         print(f"[官公需API] 失敗・既存データ維持: {str(e)[:70]}")
 
     if fast or full:
+        # 0a) 東京都電子調達（SP版JSON API・HTTPのみ）。官公需APIの東京都庁カバーは
+        #     384件しかなく、都の実発注（常時800件超）が最大の穴だったため直接取得。
+        #     取得0件時は既存行を維持（load側でガード済み）。
+        try:
+            import tokyo_scraper
+            n_tokyo = tokyo_scraper.load()
+            print(f"[東京都電子調達] {n_tokyo} 件（発注予定情報: 物品・委託＋工事）")
+        except Exception as e:  # noqa: BLE001
+            print(f"[東京都電子調達] 取得失敗（スキップ・既存維持）: {str(e)[:70]}")
+
         # HTTPのみモード：監視機関だけ足して終了（Playwrightは使わない）
         # 0b) 調達ポータル「落札実績オープンデータ」（国の調達の落札者・落札価格）。
         #     競合（落札者）分析データを全国分に拡充。HTTPでZIP/CSVを取るだけ＝堅牢。

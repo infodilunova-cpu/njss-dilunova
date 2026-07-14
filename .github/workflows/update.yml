@@ -27,7 +27,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: 回帰テスト（壊れていたら中止）
-        run: python test_procurement.py && python test_kkj.py
+        run: python test_procurement.py && python test_kkj.py && python test_tokyo.py && python test_awards.py
 
       - name: 網羅DB生成（全国・都道府県分割）
         run: python update.py --full
