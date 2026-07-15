@@ -379,6 +379,10 @@ def case_detail(case_id: int):
         requirements=requirements,
         ai_enabled=auth.can_use_ai(),
         ai_cached=bool(db.get_ai_assist(case.get("external_id", ""))),
+        plan_cached=bool(db.get_ai_assist(
+            _PLAN_CACHE_PREFIX + case.get("external_id", ""))),
+        # 入札額ガイド（落札実績の統計・非AI）。AIの結果と並記するためサーバ側でも渡す。
+        price_guide=db.price_guide(case.get("category", ""), case.get("agency", "")),
     )
 
 
@@ -421,6 +425,61 @@ def case_ai_assist(case_id: int):
         db.set_ai_assist(ext, json.dumps(result, ensure_ascii=False),
                          result.get("model", ""))
     result["cached"] = False
+    return jsonify(result)
+
+
+# 入札準備プランのキャッシュキー接頭辞。AI応募アシストと同じ ai_assist テーブルに
+# 同居させつつ、判定結果（素の external_id）とは別枠で保持する。
+_PLAN_CACHE_PREFIX = "plan:"
+
+
+@app.route("/case/<int:case_id>/bid-plan", methods=["POST"])
+def case_bid_plan(case_id: int):
+    """【課金プラン・オンデマンド】入札準備プラン（入札直前までの段取り）を生成して返す。
+
+    認可・キャッシュの流儀は /ai-assist と同じ（タップ時のみ課金、?refresh=1 で再生成）。
+    キャッシュは "plan:" 接頭辞で応募アシストと別枠。入札額ガイド(price_guide)は
+    非AIの確定値なので、キャッシュの有無に関わらず毎回サーバ側で計算して並記する。
+    """
+    import json
+    if not auth.can_use_ai():
+        return jsonify({"enabled": False,
+                        "reason": "このアカウントではAIモードが有効化されていません。"})
+    case = db.get_case(case_id)
+    if not case:
+        abort(404)
+    ext = case.get("external_id", "")
+    refresh = request.args.get("refresh") == "1"
+    # 落札実績の統計（非AI）。AIの price_hint と並記して数字の裏付けにする。
+    guide = db.price_guide(case.get("category", ""), case.get("agency", ""))
+
+    if not refresh and ext:
+        cached = db.get_ai_assist(_PLAN_CACHE_PREFIX + ext)
+        if cached:
+            data = json.loads(cached["payload"])
+            data["cached"] = True
+            data["price_guide"] = guide
+            data["budget_yen"] = case.get("budget_yen") or 0
+            return jsonify(data)
+
+    if not ai_assist.is_enabled():
+        return jsonify({"enabled": False})
+
+    try:
+        requirements = procurement.application_requirements(case)
+        result = ai_assist.bid_plan(case, db.get_profile(), requirements, guide)
+    except Exception as e:  # noqa: BLE001 — AI失敗で500にせず画面で案内
+        logging.getLogger(__name__).warning("bid plan failed", exc_info=True)
+        return jsonify({"enabled": True, "error": str(e)[:200]}), 200
+
+    # 解析失敗（error付き）はキャッシュしない＝再タップで再挑戦できる。
+    if result.get("enabled") and not result.get("error") and ext:
+        db.set_ai_assist(_PLAN_CACHE_PREFIX + ext,
+                         json.dumps(result, ensure_ascii=False),
+                         result.get("model", ""))
+    result["cached"] = False
+    result["price_guide"] = guide
+    result["budget_yen"] = case.get("budget_yen") or 0
     return jsonify(result)
 
 

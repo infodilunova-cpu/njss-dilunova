@@ -1109,6 +1109,106 @@ def competitor_cases(winner: str) -> list[dict[str, Any]]:
 
 
 # ============================================================
+# 入札額ガイド（落札実績の統計・AI不使用）
+# ============================================================
+
+# 統計を出す最小サンプル数。これ未満の層は None（当てにならない数字を出さない）。
+_PRICE_GUIDE_MIN = 3
+
+
+def _win_price_yen(s: str) -> int | None:
+    """落札価格の表示文字列（"1,073,500,000円" / "100.50円" 等）を円(int)にする。
+
+    数字が取れない・0円以下は None（統計に混ぜない）。
+    ※ yen_to_int は "100.50" を 10050 と誤読するため、小数対応の専用パーサ。
+    """
+    m = re.search(r"[\d,]+(?:\.\d+)?", s or "")
+    if not m:
+        return None
+    try:
+        v = float(m.group(0).replace(",", ""))
+    except ValueError:
+        return None
+    n = int(round(v))
+    return n if n > 0 else None
+
+
+def _percentile(sorted_vals: list, q: float) -> float:
+    """昇順リストの分位点 q(0〜1) を線形補間で求める（numpyの既定と同等の単純実装）。"""
+    pos = (len(sorted_vals) - 1) * q
+    lo = int(pos)
+    hi = min(lo + 1, len(sorted_vals) - 1)
+    return sorted_vals[lo] + (sorted_vals[hi] - sorted_vals[lo]) * (pos - lo)
+
+
+def _price_stats(prices: list[int]) -> dict[str, Any] | None:
+    """落札額リストの件数・中央値・25/75パーセンタイル。件数不足なら None。"""
+    if len(prices) < _PRICE_GUIDE_MIN:
+        return None
+    s = sorted(prices)
+    return {
+        "count": len(s),
+        "median": int(round(_percentile(s, 0.5))),
+        "p25": int(round(_percentile(s, 0.25))),
+        "p75": int(round(_percentile(s, 0.75))),
+    }
+
+
+def price_guide(category: str, agency: str) -> dict[str, Any] | None:
+    """同カテゴリの落札実績から入札額の目安統計を返す（決定的・AI不使用）。
+
+    cases の落札実績（winner と win_price が入っている行）を母集団に、
+      - category_stats … 同カテゴリ全体の 件数/中央値/25/75パーセンタイル
+      - agency_stats   … そのうち同一発注機関（agency 完全一致）分の同統計
+                          （※機関だけ一致でカテゴリ違いの実績は入札額の参考に
+                            ならないため、同カテゴリ内に絞って集計する）
+      - win_rate       … 予定価格(budget_yen>0)が分かる実績での 落札額/予定価格
+                          の中央値（落札率）。落札実績側は budget_yen=0 が大半
+                          なので、比較できるペアが _PRICE_GUIDE_MIN 件未満なら None
+    を計算する。件数が _PRICE_GUIDE_MIN 件未満の層は None（誤誘導を防ぐ）。
+    どの層も出せなければ全体を None で返す。
+    """
+    category = (category or "").strip()
+    agency = (agency or "").strip()
+    if not category:
+        return None
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT agency, win_price, budget_yen FROM cases "
+            "WHERE category = ? AND winner != '' AND win_price != ''",
+            (category,)).fetchall()
+
+    cat_prices: list[int] = []
+    agc_prices: list[int] = []
+    ratios: list[float] = []
+    for r in rows:
+        yen = _win_price_yen(r["win_price"])
+        if yen is None:
+            continue
+        cat_prices.append(yen)
+        if agency and r["agency"] == agency:
+            agc_prices.append(yen)
+        b = r["budget_yen"] or 0
+        if b > 0:
+            ratios.append(yen / b)
+
+    win_rate = None
+    if len(ratios) >= _PRICE_GUIDE_MIN:
+        win_rate = {"count": len(ratios),
+                    "median": round(_percentile(sorted(ratios), 0.5), 3)}
+    guide = {
+        "category": category,
+        "agency": agency,
+        "category_stats": _price_stats(cat_prices),
+        "agency_stats": _price_stats(agc_prices),
+        "win_rate": win_rate,
+    }
+    if not (guide["category_stats"] or guide["agency_stats"] or win_rate):
+        return None
+    return guide
+
+
+# ============================================================
 # マイ条件（プロフィール）とマッチング
 # ============================================================
 

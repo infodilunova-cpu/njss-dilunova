@@ -78,6 +78,42 @@
     <div id="aiResult" class="ai-result" hidden></div>
   </section>
 
+  <section class="plan-box" data-case-id="{{ c.id }}" data-cached="{{ '1' if plan_cached else '0' }}">
+    <h2>入札準備プラン（AI） <span class="ai-tag">課金プラン</span></h2>
+    <p class="ai-lead">締切から逆算したスケジュール・提出書類・参加申請書に使える自社紹介文の下書き・
+      入札額の目安まで、<strong>入札書を出す直前</strong>の段取りをまとめて用意します。</p>
+
+    {# 入札額の目安（落札実績の統計）。非AIの確定値なのでサーバ側で常時表示し、AIの結果と並記する。 #}
+    {% if price_guide %}
+    <div class="price-guide">
+      <h3>入札額の目安 — 落札実績の統計（AI不使用）</h3>
+      <ul class="pg-list">
+        {% if price_guide.category_stats %}{% set s = price_guide.category_stats %}
+        <li>同カテゴリ「{{ c.category }}」の落札額（{{ s.count }}件）:
+          中央値 <strong>{{ '{:,}'.format(s.median) }}円</strong>
+          <span class="muted">（25〜75%: {{ '{:,}'.format(s.p25) }}〜{{ '{:,}'.format(s.p75) }}円）</span></li>
+        {% endif %}
+        {% if price_guide.agency_stats %}{% set s = price_guide.agency_stats %}
+        <li>同一機関「{{ c.agency }}」の同カテゴリ落札額（{{ s.count }}件）:
+          中央値 <strong>{{ '{:,}'.format(s.median) }}円</strong>
+          <span class="muted">（25〜75%: {{ '{:,}'.format(s.p25) }}〜{{ '{:,}'.format(s.p75) }}円）</span></li>
+        {% endif %}
+        {% if price_guide.win_rate %}
+        <li>予定価格に対する落札率の中央値 {{ '%.1f' % (price_guide.win_rate.median * 100) }}%（{{ price_guide.win_rate.count }}件）
+          {%- if c.budget_yen %} → この案件の予定価格 {{ '{:,}'.format(c.budget_yen) }}円 なら
+          目安 <strong>{{ '{:,}'.format((c.budget_yen * price_guide.win_rate.median) | round | int) }}円</strong>{% endif %}</li>
+        {% endif %}
+      </ul>
+      <p class="pg-note muted small">過去の落札実績からの統計値です。実際の入札額は仕様書と積算で必ず精査してください。</p>
+    </div>
+    {% endif %}
+
+    <button type="button" class="btn primary" id="planRun">
+      {% if plan_cached %}プランを見る{% else %}AIで入札準備プランを作る{% endif %}
+    </button>
+    <div id="planResult" class="ai-result" hidden></div>
+  </section>
+
   <section class="guide-box">
     <h2>応募ガイド — この案件に入札するには</h2>
 
@@ -413,6 +449,129 @@
       + '<div class="ai-loading-sub">10〜30秒ほどかかります。そのままお待ちください。</div></div>';
     btn.disabled = true;
     var url = '/case/' + caseId + '/ai-assist' + (refresh ? '?refresh=1' : '');
+    fetch(url, { method: 'POST' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { render(d); })
+      .catch(function () { out.innerHTML = '<p class="ai-note">通信に失敗しました。再度お試しください。</p>'; })
+      .finally(function () { btn.disabled = false; });
+  }
+  btn.addEventListener('click', function () { run(false); });
+})();
+</script>
+
+<script>
+/* 入札準備プラン（AI・オンデマンド）。応募アシストと同じ流儀で、キャッシュは別枠（plan:）。
+   入札額の目安の数字（price_guide）は非AIでサーバから来るため、AIの price_hint と並記する。 */
+(function () {
+  var box = document.querySelector('.plan-box');
+  if (!box) return;
+  var btn = document.getElementById('planRun');
+  var out = document.getElementById('planResult');
+  var caseId = box.getAttribute('data-case-id');
+  var esc = function (s) {
+    var d = document.createElement('div'); d.textContent = (s == null ? '' : s); return d.innerHTML;
+  };
+  var ul = function (items) {
+    return '<ul>' + (items || []).map(function (x) { return '<li>' + esc(x) + '</li>'; }).join('') + '</ul>';
+  };
+  var yen = function (n) { return (n || 0).toLocaleString('ja-JP') + '円'; };
+
+  /* 非AIの落札実績統計（サーバ計算）を箇条書きHTMLにする */
+  function priceGuideHtml(pg, budget) {
+    if (!pg) return '';
+    var lines = [];
+    if (pg.category_stats) {
+      var c = pg.category_stats;
+      lines.push('同カテゴリの落札額（' + c.count + '件）: 中央値 ' + yen(c.median)
+        + '（25〜75%: ' + yen(c.p25) + '〜' + yen(c.p75) + '）');
+    }
+    if (pg.agency_stats) {
+      var a = pg.agency_stats;
+      lines.push('同一発注機関の同カテゴリ落札額（' + a.count + '件）: 中央値 ' + yen(a.median)
+        + '（25〜75%: ' + yen(a.p25) + '〜' + yen(a.p75) + '）');
+    }
+    if (pg.win_rate) {
+      var line = '落札率の中央値 ' + (pg.win_rate.median * 100).toFixed(1) + '%（' + pg.win_rate.count + '件）';
+      if (budget) line += ' → 予定価格 ' + yen(budget) + ' なら目安 ' + yen(Math.round(budget * pg.win_rate.median));
+      lines.push(line);
+    }
+    return lines.length ? ul(lines) : '';
+  }
+
+  function render(d) {
+    if (d.enabled === false) {
+      out.innerHTML = '<p class="ai-note">この機能は<strong>課金プラン</strong>で有効化されます'
+        + '（管理者がAPIキーを設定すると使えます）。</p>';
+      return;
+    }
+    if (d.error) {
+      out.innerHTML = '<p class="ai-note">AIの生成に失敗しました。時間をおいて再度お試しください。<br>'
+        + '<span class="muted">' + esc(d.error) + '</span></p>';
+      return;
+    }
+    var html = '';
+    if (d.next_action) {
+      html += '<div class="plan-next"><strong>今日の一歩:</strong> ' + esc(d.next_action) + '</div>';
+    }
+    if (d.schedule && d.schedule.length) {
+      html += '<div class="ai-block"><h3>スケジュール（締切から逆算）</h3>'
+        + '<table class="list plan-schedule"><thead><tr><th>日付の目安</th><th>やること</th></tr></thead><tbody>'
+        + d.schedule.map(function (s) {
+            return '<tr><td class="nowrap">' + esc(s.date) + '</td><td>' + esc(s.action) + '</td></tr>';
+          }).join('')
+        + '</tbody></table></div>';
+    }
+    if (d.documents && d.documents.length) {
+      html += '<div class="ai-block"><h3>提出書類チェックリスト</h3><ul class="checklist">'
+        + d.documents.map(function (x) {
+            return '<li><label><input type="checkbox"> ' + esc(x) + '</label></li>';
+          }).join('') + '</ul></div>';
+    }
+    if (d.draft) {
+      html += '<div class="ai-block"><h3>自社紹介文の下書き（参加申請書用）</h3>'
+        + '<div class="plan-draft">' + esc(d.draft) + '</div>'
+        + '<button type="button" class="btn small" id="planCopy">下書きをコピー</button></div>';
+    }
+    var pgHtml = priceGuideHtml(d.price_guide, d.budget_yen);
+    if (pgHtml || d.price_hint) {
+      html += '<div class="ai-block"><h3>入札額の目安</h3>' + pgHtml
+        + (d.price_hint ? '<p class="plan-hint">' + esc(d.price_hint) + '</p>' : '') + '</div>';
+    }
+    if (d.risks && d.risks.length) {
+      html += '<div class="ai-block"><h3>つまずきやすいポイント</h3>' + ul(d.risks) + '</div>';
+    }
+    html += '<p class="ai-foot muted">'
+      + 'AIで出した結果です。日付・金額は必ず公告原本で確認してください。'
+      + ' <a href="#" id="planRefresh">再生成</a></p>';
+    out.innerHTML = html;
+
+    var cp = document.getElementById('planCopy');
+    if (cp) cp.addEventListener('click', function () {
+      var text = d.draft || '';
+      function done() { cp.textContent = 'コピーしました'; setTimeout(function () { cp.textContent = '下書きをコピー'; }, 1500); }
+      function fallback() {
+        var ta = document.createElement('textarea'); ta.value = text;
+        document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); done(); } catch (e) {}
+        document.body.removeChild(ta);
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, fallback);
+      } else { fallback(); }
+    });
+    var rf = document.getElementById('planRefresh');
+    if (rf) rf.addEventListener('click', function (e) { e.preventDefault(); run(true); });
+  }
+
+  function run(refresh) {
+    out.hidden = false;
+    out.innerHTML = '<div class="ai-loading">'
+      + '<div class="ai-loading-msg">AIが締切から逆算してプランを組んでいます'
+      + '<span class="ai-dots"><i>.</i><i>.</i><i>.</i></span></div>'
+      + '<div class="ai-bar"></div>'
+      + '<div class="ai-loading-sub">10〜30秒ほどかかります。そのままお待ちください。</div></div>';
+    btn.disabled = true;
+    var url = '/case/' + caseId + '/bid-plan' + (refresh ? '?refresh=1' : '');
     fetch(url, { method: 'POST' })
       .then(function (r) { return r.json(); })
       .then(function (d) { render(d); })

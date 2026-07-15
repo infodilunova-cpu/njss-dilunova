@@ -27,6 +27,7 @@ import os
 import subprocess
 import tempfile
 import urllib.request
+from datetime import date
 from pathlib import Path
 from typing import Any
 
@@ -241,16 +242,21 @@ def _build_user_text(case: dict, profile: dict | None, req: dict | None,
     )
 
 
-def _call_gemini(user_text: str) -> dict[str, Any]:
-    """Gemini に構造化出力で問い合わせ、JSON dict を返す（依存はstdlibのみ）。"""
+def _call_gemini(user_text: str, *, system: str | None = None,
+                 schema: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Gemini に構造化出力で問い合わせ、JSON dict を返す（依存はstdlibのみ）。
+
+    system/schema を省略すると従来どおり応募アシスト用（_SYSTEM/_SCHEMA）。
+    入札準備プラン等、別スキーマの生成でも同じ呼び口を共用する。
+    """
     key, model = _api_key(), _model()
     url = f"{_API_BASE}/{model}:generateContent?key={key}"
     body = {
-        "systemInstruction": {"parts": [{"text": _SYSTEM}]},
+        "systemInstruction": {"parts": [{"text": system if system is not None else _SYSTEM}]},
         "contents": [{"role": "user", "parts": [{"text": user_text}]}],
         "generationConfig": {
             "responseMimeType": "application/json",
-            "responseSchema": _SCHEMA,
+            "responseSchema": schema if schema is not None else _SCHEMA,
             "temperature": 0.3,
         },
     }
@@ -284,6 +290,182 @@ def assist(case: dict, profile: dict | None = None,
     # タップ時に公告PDFの全文を取得してAIに読ませる（取れなければ説明文にフォールバック）。
     notice_text = _fetch_pdf_text(case.get("detail_url", ""))
     data = _call_gemini(_build_user_text(case, profile, requirements, notice_text))
+    data["enabled"] = True
+    data["model"] = _model()
+    data["source"] = "pdf_full" if notice_text else "description"
+    return data
+
+
+# ============================================================
+# 入札準備プラン（入札直前まで導く・オンデマンド）
+# ============================================================
+
+# Gemini の構造化出力スキーマ（入札準備プラン用）。応募アシストとは別スキーマ。
+_PLAN_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "schedule": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "date": {"type": "string",
+                             "description": "YYYY-MM-DD 形式の目安日（幅がある場合は「〜7/20」等も可）"},
+                    "action": {"type": "string"},
+                },
+                "required": ["date", "action"],
+            },
+            "description": "今日から入札書提出までの逆算スケジュール"
+                           "（公告確認→説明会/質問期限→参加申請→仕様書精読→見積・体制→入札書提出）",
+        },
+        "documents": {
+            "type": "array", "items": {"type": "string"},
+            "description": "提出書類チェックリスト（この案件に即して具体化）",
+        },
+        "draft": {
+            "type": "string",
+            "description": "参加申請書・様式に書く自社紹介文の下書き（150〜300字）",
+        },
+        "price_hint": {
+            "type": "string",
+            "description": "入札額の考え方（渡された落札実績統計の要約＋注意）",
+        },
+        "risks": {
+            "type": "array", "items": {"type": "string"},
+            "description": "この案件でつまずきやすいポイント",
+        },
+        "next_action": {
+            "type": "string",
+            "description": "今日やるべき最初の一歩を1文で",
+        },
+    },
+    "required": ["schedule", "documents", "draft", "price_hint", "risks", "next_action"],
+}
+
+_PLAN_SYSTEM = (
+    "あなたは日本の公共入札に精通した入札支援の専門家です。"
+    "与えられた案件の公告本文・確定的に算出済みの必要書類・落札実績の統計・"
+    "自社のマイ条件を読み込み、この事業者が『入札書を提出する直前』まで迷わず"
+    "進めるよう、実行順のプランを組み立てます。"
+    "schedule は今日の日付と申込締切から逆算し、"
+    "公告の確認→現場説明会/質問書の期限→参加申請の提出→仕様書の精読→"
+    "見積作成・体制確保→入札書の提出、の順で日付の目安（YYYY-MM-DD）を付けること。"
+    "締切が過ぎている・不明な場合はその旨を schedule の action に明記すること。"
+    "draft は自社名・保有資格・実績（マイ条件にある事実のみ）から150〜300字で、"
+    "参加申請書にそのまま書ける丁寧な文体にすること。マイ条件に無い実績を創作しないこと。"
+    "price_hint は渡された落札実績統計（非AIの確定値）の要約に留め、"
+    "統計が無い場合は無いと明記し、根拠のない金額を提示しないこと。"
+    "公告本文に書かれていない具体値（日付・金額・要件）は創作せず『公告で確認』と述べること。"
+    "出力は必ず指定のJSONスキーマに従うJSONのみを日本語で返すこと。"
+)
+
+
+def _price_guide_lines(guide: dict | None) -> str:
+    """db.price_guide() の統計をプロンプト用テキストにする（無ければ明示）。"""
+    if not guide:
+        return "（同カテゴリの落札実績データなし。price_hint では統計が無い旨を伝えること）"
+    lines = []
+    c = guide.get("category_stats")
+    if c:
+        lines.append(
+            f"同カテゴリ「{guide.get('category', '')}」の落札額: {c['count']}件 / "
+            f"中央値 {c['median']:,}円 / 25〜75%範囲 {c['p25']:,}〜{c['p75']:,}円")
+    a = guide.get("agency_stats")
+    if a:
+        lines.append(
+            f"同一発注機関「{guide.get('agency', '')}」の同カテゴリ落札額: {a['count']}件 / "
+            f"中央値 {a['median']:,}円 / 25〜75%範囲 {a['p25']:,}〜{a['p75']:,}円")
+    w = guide.get("win_rate")
+    if w:
+        lines.append(f"予定価格に対する落札率の中央値: {w['median']:.1%}（{w['count']}件）")
+    return "\n".join(lines) if lines else "（統計を算出できる落札実績が不足）"
+
+
+def _build_plan_text(case: dict, profile: dict | None, req: dict | None,
+                     price_guide: dict | None, notice_text: str = "",
+                     today: str = "") -> str:
+    """入札準備プラン生成用のユーザープロンプトを組み立てる（純関数・テスト対象）。"""
+    today = today or date.today().isoformat()
+    desc = (notice_text or case.get("description") or "").strip()
+    src_label = "公告全文（PDFから取得）" if notice_text else "公告本文（抜粋・2000字まで）"
+    deadline = case.get("deadline", "") or "不明"
+    return (
+        f"# 今日の日付\n{today}\n\n"
+        "# 案件\n"
+        f"案件名: {case.get('title', '')}\n"
+        f"発注機関: {case.get('agency', '')}（{case.get('agency_type', '')}）\n"
+        f"都道府県: {case.get('prefecture', '')} / 地方: {case.get('region', '')}\n"
+        f"業種: {case.get('category', '')}\n"
+        f"入札方式: {case.get('bid_method', '') or '不明'}\n"
+        f"公告日: {case.get('announced_date', '') or '不明'}\n"
+        f"申込締切: {deadline}（schedule はこの締切と今日の日付から逆算すること）\n"
+        f"予定価格: {case.get('budget', '') or '非公表/不明'}\n\n"
+        f"# {src_label}\n"
+        f"{desc or '（本文なし。公告ページで要確認）'}\n\n"
+        "# 確定的に算出済みの必要書類（土台。documents はこれを案件に即して具体化する）\n"
+        f"{_requirements_lines(req)}\n\n"
+        "# 落札実績の統計（非AIの確定値。price_hint はこの数字の要約＋注意に限ること）\n"
+        f"{_price_guide_lines(price_guide)}\n\n"
+        "# 自社（マイ条件。draft はここにある事実のみで書くこと）\n"
+        f"{_profile_lines(profile)}\n\n"
+        "注意: 上記に書かれている事実のみを根拠にし、書かれていない具体値"
+        "（日付・金額・要件等）は創作しないこと。本文で確認できない事項は"
+        "『公告で確認』と述べること。"
+    )
+
+
+def _normalize_plan(data: Any) -> dict[str, Any]:
+    """Gemini応答を検証・正規化する。使い物にならない形なら ValueError。
+
+    responseSchema で型はほぼ保証されるが、欠損・空応答でUIが壊れないよう
+    最終防衛線としてここで形を確定させる。
+    """
+    if not isinstance(data, dict):
+        raise ValueError("応答がJSONオブジェクトではありません")
+    schedule = []
+    for s in data.get("schedule") or []:
+        if isinstance(s, dict) and str(s.get("action") or "").strip():
+            schedule.append({"date": str(s.get("date") or "").strip(),
+                             "action": str(s["action"]).strip()})
+    out = {
+        "schedule": schedule,
+        "documents": [str(x).strip() for x in (data.get("documents") or []) if str(x).strip()],
+        "draft": str(data.get("draft") or "").strip(),
+        "price_hint": str(data.get("price_hint") or "").strip(),
+        "risks": [str(x).strip() for x in (data.get("risks") or []) if str(x).strip()],
+        "next_action": str(data.get("next_action") or "").strip(),
+    }
+    if not out["schedule"] and not out["next_action"]:
+        raise ValueError("スケジュールが空の応答です")
+    return out
+
+
+def bid_plan(case: dict, profile: dict | None = None,
+             requirements: dict | None = None,
+             price_guide: dict | None = None) -> dict[str, Any]:
+    """案件1件の「入札直前まで」の準備プランをオンデマンド生成して返す。
+
+    assist() と同じ流儀: キー未設定なら {"enabled": False}。公告PDFの全文を
+    読めれば読み、締切逆算スケジュール・提出書類・申請書の下書き・入札額の
+    考え方（price_guide は db.price_guide() の非AI統計）・リスク・次の一歩を返す。
+    応答のパースに失敗したら安全なエラーdict（enabled + error）を返す。
+    """
+    if not is_enabled():
+        return {"enabled": False}
+
+    if requirements is None:
+        try:
+            requirements = procurement.application_requirements(case)
+        except Exception:  # noqa: BLE001 — 土台が無くてもAIは動かす
+            requirements = None
+
+    notice_text = _fetch_pdf_text(case.get("detail_url", ""))
+    text = _build_plan_text(case, profile, requirements, price_guide, notice_text)
+    try:
+        data = _normalize_plan(
+            _call_gemini(text, system=_PLAN_SYSTEM, schema=_PLAN_SCHEMA))
+    except ValueError as e:  # JSONDecodeError 含む＝応答が壊れている
+        return {"enabled": True, "error": f"AI応答の解析に失敗しました: {e}"[:200]}
     data["enabled"] = True
     data["model"] = _model()
     data["source"] = "pdf_full" if notice_text else "description"

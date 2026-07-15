@@ -685,3 +685,18 @@ tr.agc-off td.center { opacity: 1; }
 .ai-statuspick .stpick-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 .stpick-row .st-pick { font-size: 12px; padding: 5px 11px; border-radius: 999px; }
 .stpick-row .st-pick:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ===== 入札準備プラン（AI・入札直前まで導く）。ai-box と同系の枠を緑系で ===== */
+.plan-box { border: 1px solid #bbe3c8; background: #f2fbf5; border-radius: 10px; padding: 16px 18px; margin: 18px 0; }
+.plan-box h2 { margin-top: 0; }
+.plan-box .ai-tag { background: #16a34a; }
+/* 入札額の目安（落札実績の統計・非AI） */
+.price-guide { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 10px 14px; margin: 10px 0 12px; }
+.price-guide h3 { font-size: 13px; margin: 0 0 6px; color: var(--text-secondary); }
+.pg-list { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.8; }
+.pg-note { margin: 6px 0 0; }
+/* 今日の一歩・逆算スケジュール・下書き */
+.plan-next { background: var(--success-soft); color: var(--success); border-radius: 8px; padding: 10px 14px; font-weight: 600; margin: 12px 0; }
+.plan-schedule { font-size: 13px; margin: 6px 0; }
+.plan-draft { background: #fff; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin: 6px 0 8px; white-space: pre-wrap; line-height: 1.7; }
+.plan-hint { margin: 8px 0 0; font-size: 13px; color: var(--text-secondary); }
