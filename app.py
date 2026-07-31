@@ -408,6 +408,11 @@ def case_ai_assist(case_id: int):
         cached = db.get_ai_assist(ext)
         if cached:
             data = json.loads(cached["payload"])
+            # 旧世代のキャッシュにも現行の判定ポリシーを適用して返す
+            # （登録情報が無いのに〇/✕断定していた過去の結果を△に補正）。
+            data["eligibility"] = ai_assist.apply_verdict_policy(
+                data.get("eligibility"),
+                ai_assist.profile_registered(db.get_profile()))
             data["cached"] = True
             return jsonify(data)
 

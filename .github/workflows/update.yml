@@ -30,7 +30,7 @@ jobs:
         run: pip install playwright && python -m playwright install --with-deps chromium
 
       - name: 回帰テスト（壊れていたら中止）
-        run: python test_procurement.py && python test_kkj.py && python test_tokyo.py && python test_awards.py && python test_dedupe.py
+        run: python test_procurement.py && python test_kkj.py && python test_tokyo.py && python test_awards.py && python test_dedupe.py && python test_ai_policy.py
 
       - name: 網羅DB生成（全国・都道府県分割＋自治体個別システム）
         env:

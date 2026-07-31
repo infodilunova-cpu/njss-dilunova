@@ -150,21 +150,73 @@ _SCHEMA: dict[str, Any] = {
 }
 
 _SYSTEM = (
-    "あなたは日本の公共入札（電気工事系）に精通した入札支援の専門家です。"
+    "あなたは日本の公共入札（工事・役務・物品の全業種）に精通した入札支援の専門家です。"
     "与えられた案件の公告本文・確定的に算出済みの必要書類・ユーザーの保有資格(マイ条件)を"
     "読み込み、この事業者がこの案件に『応募する一歩手前』まで到達できるよう具体的に支援します。"
     "一般論ではなく、この案件の実態に即して書くこと。"
-    "とくに参加資格の『等級(ランク／格付け：A・B・C等)』を公告本文から読み取り、"
-    "自社の経審等級と照合すること。案件の要求等級が自社等級より上位で応募できない"
-    "（例: 要求A、自社C＝等級不足）と本文から明確に判断できる場合は、verdict を ✕ とし、"
-    "reasons の先頭に『等級不足: 要求◯◯・自社◯◯』の形で具体的な根拠を必ず記載すること。"
-    "等級が要件を満たす場合は 〇、本文に等級の記載が無い・判断材料が不足する場合は △ または不明とすること。"
-    "なお verdict に関わらず、reasons の中に必ず1項目『等級: 要求◯◯／自社◯◯』を入れること"
+    "参加資格の適合判定(verdict)は次のルールで決めること: "
+    "【1】マイ条件に保有資格・等級・機関別資格などの登録情報が無い（未設定）場合は、"
+    "〇/✕を断定せず必ず △ とし、reasons の先頭で登録情報が未登録のため判定できないことを伝える。"
+    "【2】登録情報がある場合: 公告が要求する資格・許可・等級・登録"
+    "（例: 要求A等級、建設業許可、警備業認定、ISO、地域要件）のうち自社に無いものが"
+    "本文から明確なら verdict を ✕ とし、reasons の先頭に"
+    "『不足: ◯◯（要求◯◯／自社◯◯または未保有）』の形で何が無いかを必ず明記する。"
+    "【3】要求要件を自社の登録情報が満たしていると確認できる場合のみ 〇。"
+    "【4】公告に要件の記載が無い・判断材料が不足する場合は △。"
+    "とくに『等級(ランク／格付け：A・B・C等)』は公告本文から読み取り自社等級と照合し"
+    "（例: 要求A、自社C＝等級不足で✕）、verdict に関わらず reasons の中に必ず1項目"
+    "『等級: 要求◯◯／自社◯◯』を入れること"
     "（公告に等級の記載が無ければ『等級: 公告に記載なし』、自社等級が未設定なら『自社未設定』と書く）。"
-    "参加資格適合の判定(verdict)は、等級不足のように本文から明確な場合を除き、確証が無ければ△または不明とし、断定しすぎないこと。"
+    "公告本文に書かれていない要件を推測で創作しないこと。"
     "必要書類は発注機関により異なるため、最終確認は公告に当たるよう注意書きを添えること。"
     "出力は必ず指定のJSONスキーマに従い、日本語で記述すること。"
 )
+
+
+# ---- 参加資格判定のポリシー（決定的・AI出力の補正）-------------------------
+
+_UNREGISTERED_REASON = (
+    "マイ条件に保有資格・等級などの登録情報が未登録のため、適合判定できません。"
+    "「マイ条件」で資格・等級を登録すると 〇/✕ で判定します。"
+)
+
+
+def profile_registered(profile: dict | None) -> bool:
+    """マイ条件に「適合判定の材料になる登録情報」が入っているか。
+
+    経審等級・保有資格・発注機関別の入札参加資格のいずれかが入って初めて
+    登録済みとみなす（対応業種はDB既定値が入るため判定材料に数えない。
+    会社名だけでも判定はできない）。
+    """
+    p = profile or {}
+    if any(str(p.get(k) or "").strip() for k in ("grade", "quals")):
+        return True
+    return any(str(q.get("issuer") or "").strip()
+               for q in (p.get("qualifications") or []) if isinstance(q, dict))
+
+
+def apply_verdict_policy(elig: dict | None, registered: bool) -> dict[str, Any]:
+    """参加資格判定にポリシーを決定的に適用する（AIの断定しすぎを防ぐ最終関門）。
+
+    - 登録情報が白紙 → 判定は必ず △（材料が無いのに 〇/✕ を出さない）
+    - 登録あり → ✕ は「何が無いか」の理由がある時だけ。理由なしの✕や
+      『不明』などスキーマ外の値は △ に丸める（UIは〇/△/✕の3状態）
+    """
+    e = dict(elig or {})
+    reasons = [str(r).strip() for r in (e.get("reasons") or []) if str(r).strip()]
+    verdict = str(e.get("verdict") or "").strip()
+    if not registered:
+        e["verdict"] = "△"
+        e["reasons"] = [_UNREGISTERED_REASON] + reasons
+        return e
+    if verdict == "✕" and not reasons:
+        verdict = "△"
+    if verdict not in ("〇", "△", "✕"):
+        verdict = "△"
+    e["verdict"] = verdict
+    e["reasons"] = reasons or [
+        "公告本文から判定材料を特定できませんでした。公告原本で参加資格要件を確認してください。"]
+    return e
 
 
 def _profile_lines(profile: dict | None) -> str:
@@ -290,6 +342,9 @@ def assist(case: dict, profile: dict | None = None,
     # タップ時に公告PDFの全文を取得してAIに読ませる（取れなければ説明文にフォールバック）。
     notice_text = _fetch_pdf_text(case.get("detail_url", ""))
     data = _call_gemini(_build_user_text(case, profile, requirements, notice_text))
+    # 判定ポリシーを最終適用（登録情報なし→△固定、根拠なし✕→△。AI任せにしない）
+    data["eligibility"] = apply_verdict_policy(
+        data.get("eligibility"), profile_registered(profile))
     data["enabled"] = True
     data["model"] = _model()
     data["source"] = "pdf_full" if notice_text else "description"

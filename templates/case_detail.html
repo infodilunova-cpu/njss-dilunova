@@ -395,6 +395,10 @@
         + '<span class="muted small"> 申請管理に登録し、AI判定の根拠をメモに残します</span></div>';
       html += '<div class="ai-next"><button type="button" class="btn primary" id="aiPlanNext">参加OK → 入札準備プラン（AI）を作る</button>'
         + '<span class="muted small"> スケジュール・提出書類・入札額の目安まで一気に用意します</span></div>';
+    } else if ((elig.reasons || []).join('').indexOf('未登録') >= 0) {
+      // マイ条件が白紙で△になったケース: NG行きではなく登録へ誘導する
+      html += '<div class="ai-ng"><a class="btn primary" href="/profile">マイ条件（保有資格・等級）を登録する</a>'
+        + '<span class="muted small"> 登録すると 〇/✕ で判定できるようになります</span></div>';
     } else if (elig.verdict) {
       html += '<div class="ai-ng"><button type="button" class="btn ng-btn" id="aiNgBtn">このままNGリストへ入れる（理由つき）</button>'
         + '<span class="muted small"> 申請管理のNG列へ移動し、足りなかった点をメモに残します</span></div>';
