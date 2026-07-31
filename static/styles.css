@@ -56,6 +56,8 @@ h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.01em; margin: 0 0 16p
   color: var(--text-secondary); font-size: 13.5px; font-weight: 450;
 }
 .sidebar nav a:hover { background: var(--bg-hover); color: var(--text-primary); text-decoration: none; }
+.sidebar nav a.logout-link { color: #dc2626; }
+.sidebar nav a.logout-link:hover { background: rgba(220, 38, 38, .08); color: #b91c1c; }
 .sidebar nav a.active {
   background: var(--bg-canvas); color: var(--text-primary); font-weight: 500;
   box-shadow: 0 0 0 1px var(--border);
@@ -659,6 +661,16 @@ tr.row-check td { background: #fffaf0; }
 
 /* AI判定→NGリストへ（案件詳細） */
 .ai-ng { margin-top: 10px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* 判定〇→入札準備プランへ進む「次のステップ」ボタン行 */
+.ai-next { margin-top: 8px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* 設定画面（アカウント・パスワード変更・ログアウト） */
+.btn.danger { background: #dc2626; color: #fff; border-color: #dc2626; }
+.btn.danger:hover { background: #b91c1c; border-color: #b91c1c; }
+.settings-value { margin: 4px 0 0; font-size: 14px; font-weight: 600; }
+.settings-actions { margin-top: 14px; display: flex; gap: 10px; flex-wrap: wrap; }
+.settings-form { display: flex; flex-direction: column; gap: 12px; max-width: 380px; }
+.settings-form button { align-self: flex-start; }
 .ng-btn { background: #dc2626; color: #fff; border-color: #dc2626; }
 .ng-btn:hover { background: #b91c1c; }
 .ng-btn:disabled { opacity: .6; cursor: default; }

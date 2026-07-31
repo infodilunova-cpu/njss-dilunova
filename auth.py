@@ -106,6 +106,17 @@ def set_vertical(email: str, vertical: str) -> bool:
     return n > 0
 
 
+def set_password(email: str, password: str) -> tuple[bool, str]:
+    """ローカル認証(users.db)ユーザーのパスワードを更新する。"""
+    if len(password or "") < 6:
+        return False, "パスワードは6文字以上にしてください"
+    with _conn() as c:
+        n = c.execute("UPDATE users SET password_hash = ? WHERE email = ?",
+                      (generate_password_hash(password), email.strip().lower())).rowcount
+        c.commit()
+    return (n > 0), ("" if n > 0 else "ユーザーが見つかりません")
+
+
 def verify(email: str, password: str) -> dict[str, Any] | None:
     """メール＋パスワードを検証し、合致すればユーザー dict を返す。"""
     email = (email or "").strip().lower()
@@ -335,6 +346,51 @@ def logout():
     session.pop("sb_user", None)
     g.pop("user", None)
     return redirect(url_for("auth.login"))
+
+
+@auth_bp.route("/settings", methods=["GET", "POST"])
+@login_required
+def settings():
+    """アカウント設定 — パスワード変更・ログアウト。
+
+    Googleログインのユーザーには「現在のパスワード」が存在しないため確認を
+    省略し、設定するとメール＋パスワードでもログインできるようになる。
+    メール登録のユーザーは、セッションを奪われただけでパスワードを変えられない
+    よう現在のパスワードを再確認してから更新する。
+    """
+    u = current_user() or {}
+    provider = (u.get("provider") or "email") if u.get("via") == "supabase" else "email"
+    if request.method == "POST":
+        cur = request.form.get("current_password", "")
+        new = request.form.get("new_password", "")
+        new2 = request.form.get("new_password2", "")
+        if len(new) < 6:
+            flash("新しいパスワードは6文字以上にしてください。", "error")
+        elif new != new2:
+            flash("新しいパスワード（確認）が一致しません。", "error")
+        elif _supa():
+            import supa_auth
+            ok = True
+            if provider != "google":
+                data, _ = supa_auth.sign_in(u.get("email", ""), cur)
+                ok = bool(data and data.get("access_token"))
+                if not ok:
+                    flash("現在のパスワードが違います。", "error")
+            if ok:
+                data, err = supa_auth.update_password(session.get("sb_token", ""), new)
+                if data is not None:
+                    flash("パスワードを変更しました。", "ok")
+                else:
+                    flash(f"パスワード変更に失敗しました: {err}", "error")
+        else:
+            if not verify(u.get("email", ""), cur):
+                flash("現在のパスワードが違います。", "error")
+            else:
+                done, msg = set_password(u.get("email", ""), new)
+                flash("パスワードを変更しました。" if done else msg,
+                      "ok" if done else "error")
+        return redirect(url_for("auth.settings"))
+    return render_template("auth/settings.html", provider=provider)
 
 
 @auth_bp.route("/admin/users", methods=["GET", "POST"])

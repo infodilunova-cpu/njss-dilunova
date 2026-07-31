@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}設定 — {{ brand.brand_title }}{% endblock %}
+
+{% block content %}
+<div class="topbar"><h1>設定</h1></div>
+<p class="lead">アカウントの管理（ログイン情報・パスワード変更・ログアウト）を行います。</p>
+
+<section class="pf-block">
+  <h2>アカウント</h2>
+  <div class="pf-grid">
+    <div class="pf-fld"><span>メールアドレス</span>
+      <p class="settings-value">{{ current_user.email if current_user else '—' }}</p></div>
+    <div class="pf-fld"><span>ログイン方法</span>
+      <p class="settings-value">{{ 'Googleアカウント' if provider == 'google' else 'メール＋パスワード' }}</p></div>
+  </div>
+  <div class="settings-actions">
+    <a class="btn danger" href="{{ url_for('auth.logout') }}">ログアウト</a>
+    {% if current_user and current_user.is_admin %}
+      <a class="btn ghost" href="{{ url_for('auth.admin_users') }}">ユーザー管理（管理者）</a>
+    {% endif %}
+  </div>
+</section>
+
+<section class="pf-block">
+  <h2>パスワード変更</h2>
+  {% if provider == 'google' %}
+    <p class="pf-hint">Googleログインのため現在のパスワードはありません。ここで設定すると、
+      以後は<strong>メール＋パスワードでもログイン</strong>できるようになります。</p>
+  {% else %}
+    <p class="pf-hint">安全のため、現在のパスワードを確認してから変更します。</p>
+  {% endif %}
+  <form method="post" action="{{ url_for('auth.settings') }}" class="settings-form">
+    {% if provider != 'google' %}
+      <label class="pf-fld"><span>現在のパスワード</span>
+        <input type="password" name="current_password" autocomplete="current-password" required></label>
+    {% endif %}
+    <label class="pf-fld"><span>新しいパスワード（6文字以上）</span>
+      <input type="password" name="new_password" autocomplete="new-password" minlength="6" required></label>
+    <label class="pf-fld"><span>新しいパスワード（確認）</span>
+      <input type="password" name="new_password2" autocomplete="new-password" minlength="6" required></label>
+    <button type="submit" class="btn primary">パスワードを変更する</button>
+  </form>
+</section>
+{% endblock %}

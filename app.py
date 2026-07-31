@@ -710,8 +710,9 @@ def profile():
         selected_prefs=[p for p in prof["prefectures"].split(",") if p],
         selected_cats=[c for c in prof["categories"].split(",") if c],
         selected_quals=[q for q in prof["quals"].split(",") if q],
-        biz_types=verticals.get(current_vertical()).get("biz_types", BIZ_TYPES),
-        qual_options=QUAL_OPTIONS,
+        # 案件は全業種を統合表示しているため、対応業種・工種・資格の選択肢も全業種版を使う
+        biz_types=verticals.ALL_BIZ_TYPES,
+        qual_options=verticals.ALL_QUAL_OPTIONS,
         regions=REGIONS,
         grades=["", "A", "B", "C", "D", "E"],
     )

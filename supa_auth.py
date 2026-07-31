@@ -81,6 +81,16 @@ def update_vertical(token: str, vertical: str) -> tuple[dict | None, str]:
                     body={"data": {"vertical": vertical}})
 
 
+def update_password(token: str, new_password: str) -> tuple[dict | None, str]:
+    """ログイン中ユーザーのパスワードを更新。
+
+    Google(OAuth)登録のユーザーが呼ぶと「パスワードの新規設定」になり、
+    以後メール＋パスワードでもログインできるようになる。
+    """
+    return _request("/auth/v1/user", method="PUT", token=token,
+                    body={"password": new_password})
+
+
 def exchange_code(code: str) -> tuple[dict | None, str]:
     """OAuth(PKCE)のcodeをセッションに交換（Google等のコールバック用）。"""
     return _request("/auth/v1/token?grant_type=pkce", method="POST",
@@ -96,11 +106,14 @@ def oauth_url(provider: str, redirect_to: str) -> str:
 def user_to_session(user: dict) -> dict[str, Any]:
     """GoTriのuser dict → アプリ内で使う最小ユーザー情報へ。"""
     meta = user.get("user_metadata") or {}
+    app_meta = user.get("app_metadata") or {}
     return {
         "id": user.get("id"),
         "email": user.get("email", ""),
         "vertical": (meta.get("vertical") or "denki"),
         "ai_enabled": bool(meta.get("ai_enabled", True)),  # 既定でAI可（個別に絞るなら後で）
         "is_admin": bool(meta.get("is_admin", False)),
+        # ログイン方法（email/google）。設定画面で「現在のパスワード」を求めるかの判定に使う
+        "provider": app_meta.get("provider", "email"),
         "via": "supabase",
     }

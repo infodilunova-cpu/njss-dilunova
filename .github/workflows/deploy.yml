@@ -1,0 +1,23 @@
+name: Renderへ即デプロイ（コードのみ）
+
+# コード変更だけを今すぐ本番へ反映したい時に手動実行する（workflow_dispatch）。
+# データ網羅更新（update.yml・毎朝）を待たずに、Render が最新 main をビルドして
+# 公開する。DBは既存の Release "data-latest" をダウンロードするだけなので数分で終わる。
+on:
+  workflow_dispatch: {}
+
+jobs:
+  trigger-render-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Render 再デプロイをトリガー（API直叩き）
+        env:
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+        run: |
+          curl -fsS -X POST \
+            "https://api.render.com/v1/services/srv-d95lvg6q1p3s73d6rpsg/deploys" \
+            -H "Authorization: Bearer $RENDER_API_KEY" \
+            -H "Content-Type: application/json" -d '{}' \
+            | head -c 300
+          echo "\nRenderが最新mainでビルド・公開します（数分）"

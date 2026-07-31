@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}{{ brand.brand_title }}{% endblock %}</title>
-  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=12">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}?v=13">
 </head>
 <body>
 <div class="app">
@@ -22,6 +22,10 @@
     <div class="spacer"></div>
     <nav>
       <a href="{{ url_for('profile') }}" class="{{ 'active' if request.endpoint == 'profile' }}">マイ条件</a>
+      {% if current_user %}
+      <a href="{{ url_for('auth.settings') }}" class="{{ 'active' if request.endpoint == 'auth.settings' }}">設定</a>
+      <a href="{{ url_for('auth.logout') }}" class="logout-link">ログアウト</a>
+      {% endif %}
     </nav>
     <div class="side-foot">
       全国の入札案件を地方・都道府県・業種で横断検索。毎日自動更新。
