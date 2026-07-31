@@ -40,11 +40,13 @@
   </div>
   <div class="field grow">
     <span>業種 <em>(複数選べます)</em></span>
-    <div class="chips">
+    {# 業種は数が多く全部並べると圧迫するため、箱内スクロール＋タップで全展開 #}
+    <div class="chips scroll">
       {% for c in categories %}
         <label class="chip"><input type="checkbox" name="category" value="{{ c }}" {{ 'checked' if c in selected.category }}><span>{{ c }}</span></label>
       {% endfor %}
     </div>
+    <button type="button" class="chips-expand" aria-expanded="false">すべて表示 ▾</button>
   </div>
   <label class="field">
     <span>新着</span>
@@ -69,6 +71,7 @@
         <label class="chip"><input type="checkbox" name="bid_method" value="{{ m }}" {{ 'checked' if m in selected.bid_method }}><span>{{ m }}</span></label>
       {% endfor %}
     </div>
+    <button type="button" class="chips-expand" aria-expanded="false">すべて表示 ▾</button>
   </div>
   <label class="field">
     <span>仕様書</span>
@@ -192,6 +195,25 @@
       opt.value = p; opt.textContent = p;
       prefSel.appendChild(opt);
     }
+  });
+
+  // 業種・入札方式の箱内スクロール ⇔ 全展開のトグル。
+  // 選択済みがスクロールで隠れていても気付けるよう、選択数をボタンに添える。
+  document.querySelectorAll('.chips-expand').forEach((btn) => {
+    const box = btn.closest('.field').querySelector('.chips.scroll');
+    const label = () => {
+      const n = box.querySelectorAll('input:checked').length;
+      const count = n ? `（選択中 ${n}）` : '';
+      return box.classList.contains('expanded')
+        ? `たたむ ▴${count}` : `すべて表示 ▾${count}`;
+    };
+    btn.textContent = label();
+    btn.addEventListener('click', () => {
+      const open = box.classList.toggle('expanded');
+      btn.setAttribute('aria-expanded', open);
+      btn.textContent = label();
+    });
+    box.addEventListener('change', () => { btn.textContent = label(); });
   });
 </script>
 {% endblock %}
