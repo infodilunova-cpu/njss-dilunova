@@ -101,6 +101,16 @@ def main() -> int:
         if n < MIN_CASES:
             print(f"[fetch_db] 案件 {n} 件は下限 {MIN_CASES} 未満。フォールバックします。")
             return 1
+        # 重複統合の安全網：Release側が統合前の世代でも、本番の件数を実数にする。
+        # init_db() で norm_key 列のマイグレーションを済ませてから統合する。
+        try:
+            db.init_db()
+            d = db.dedupe_cases()
+            if d["removed"]:
+                print(f"[fetch_db] 重複統合: -{d['removed']} 行"
+                      f"（落札実績吸収 {d['award_merged']} / 表記ゆれ・再公告 {d['collapsed']}）")
+        except Exception as e:  # noqa: BLE001 — 統合失敗でビルドは止めない
+            print(f"[fetch_db] 重複統合スキップ: {str(e)[:60]}")
         return 0
     except Exception as e:  # noqa: BLE001
         print(f"[fetch_db] ダウンロード失敗: {str(e)[:120]} → フォールバックします。")

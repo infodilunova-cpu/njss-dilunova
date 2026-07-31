@@ -159,6 +159,7 @@ def run(reset: bool = False, koukai_instances: list[str] | None = None,
                       "可能性があります（応募ガイドのポータル判定が弱くなります）。")
         except Exception as e:  # noqa: BLE001
             print(f"[警告] 監視機関リスト取得失敗: {str(e)[:70]}")
+        _dedupe_and_report()
         n_cases = db.count_cases()
         mode = "網羅更新" if full else "高速更新"
         print(f"=== {mode}完了: 案件 {n_cases} 件 / 監視機関 {db.count_agencies()} 機関 ===")
@@ -232,7 +233,24 @@ def run(reset: bool = False, koukai_instances: list[str] | None = None,
     except Exception as e:  # noqa: BLE001
         print(f"[監視機関リスト] 取得失敗（スキップ）: {str(e)[:80]}")
 
+    _dedupe_and_report()
     print(f"=== 更新完了: 案件 {db.count_cases()} 件 / 監視機関 {db.count_agencies()} 機関 ===")
+
+
+def _dedupe_and_report() -> None:
+    """全ソース取り込み後の重複統合（全角/半角ゆれ・落札実績の二重登録・再公告）。
+
+    件数カウンターを実数に保つための最終段。失敗しても更新自体は成立させる。
+    """
+    try:
+        d = db.dedupe_cases()
+        if d["removed"]:
+            print(f"[重複統合] 落札実績→公告へ吸収 {d['award_merged']} 件 / "
+                  f"表記ゆれ・再公告の統合 {d['collapsed']} 件（計 -{d['removed']} 行）")
+        else:
+            print("[重複統合] 重複なし")
+    except Exception as e:  # noqa: BLE001 — 統合失敗で日次更新を止めない
+        print(f"[重複統合] 失敗（スキップ）: {str(e)[:70]}")
 
 
 if __name__ == "__main__":

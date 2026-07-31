@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import unicodedata
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -68,6 +69,7 @@ CREATE TABLE IF NOT EXISTS cases (
     win_price     TEXT    DEFAULT '',                -- 落札価格
     description   TEXT    DEFAULT '',                -- 案件説明（締切抽出元の自由記述）
     vertical      TEXT    DEFAULT 'denki',           -- 業種テンプレ（denki/web …）。案件の所属業種
+    norm_key      TEXT    DEFAULT '',                -- 同一性判定キー（正規化 title|agency。重複統合用）
     created_at    TEXT    DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_cases_pref     ON cases(prefecture);
@@ -257,9 +259,12 @@ def init_db() -> None:
             conn.execute("ALTER TABLE cases ADD COLUMN procurement_type TEXT DEFAULT ''")
         if "budget_yen" not in case_cols:
             conn.execute("ALTER TABLE cases ADD COLUMN budget_yen INTEGER DEFAULT 0")
+        if "norm_key" not in case_cols:
+            conn.execute("ALTER TABLE cases ADD COLUMN norm_key TEXT DEFAULT ''")
         # 列追加後に索引を作成（新設列のため SCHEMA からは外してある）
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cases_proctype ON cases(procurement_type)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_cases_budgetyen ON cases(budget_yen)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_cases_normkey ON cases(norm_key)")
         # applications の後付け列をマイグレーション（無ければ追加）。
         # bid-next-eta（川野電気システム）の管理機能を移植するために拡張した列。
         app_cols = [r[1] for r in conn.execute("PRAGMA table_info(applications)")]
@@ -291,6 +296,20 @@ def init_db() -> None:
         pass
 
 
+def normalize_dedupe_key(title: str, agency: str) -> str:
+    """案件の同一性判定キー（表記ゆれを吸収した title|agency）。
+
+    同じ案件が「全角/半角」「空白の有無」「（ vs (」などの表記差で別レコードに
+    ならないよう、NFKC正規化＋空白除去＋小文字化して比較用キーを作る。
+    例: 「令和８年度　健診業務」と「令和8年度 健診業務」→ 同一キー。
+    """
+    def _n(s: str) -> str:
+        s = unicodedata.normalize("NFKC", s or "")
+        s = re.sub(r"\s+", "", s)
+        return s.lower()
+    return f"{_n(title)}|{_n(agency)}"
+
+
 def upsert_cases(rows: list[dict[str, Any]]) -> int:
     """案件を一括投入。external_id が衝突したら上書き更新。投入件数を返す。"""
     cols = [
@@ -298,7 +317,7 @@ def upsert_cases(rows: list[dict[str, Any]]) -> int:
         "region", "prefecture", "category", "procurement_type", "bid_method",
         "announced_date", "deadline", "detail_url", "spec_status", "spec_reason",
         "spec_url", "budget", "budget_yen", "winner", "win_price", "description",
-        "vertical",
+        "vertical", "norm_key",
     ]
     placeholders = ", ".join(["?"] * len(cols))
     updates = ", ".join(f"{c}=excluded.{c}" for c in cols if c != "external_id")
@@ -315,6 +334,9 @@ def upsert_cases(rows: list[dict[str, Any]]) -> int:
                 return int(v) if v not in ("", None) else 0
             except (TypeError, ValueError):
                 return 0
+        # 重複統合キーは取り込み時に常にサーバ側で計算（取得元には持たせない）
+        if c == "norm_key":
+            return normalize_dedupe_key(r.get("title", ""), r.get("agency", ""))
         return r.get(c, "")
 
     with _connect() as conn:
@@ -696,6 +718,98 @@ def export_cases_csv() -> str:
         ).fetchall():
             w.writerow([r[c] for c in CSV_COLUMNS])
     return out.getvalue()
+
+
+# 落札実績データのソース名（公告と同一案件なら実績行を公告側へ吸収する）
+AWARD_SOURCE = "調達ポータル落札実績"
+
+
+def _absorb_case_rows(conn: sqlite3.Connection, rows: list[dict[str, Any]],
+                      keep_id: int) -> None:
+    """重複行を削除し、行に紐づく申請(applications)は keep_id の案件へ付け替える。"""
+    for r in rows:
+        # 生き残り側に申請が既にあれば IGNORE され、残った古い方は次のDELETEで消える
+        conn.execute("UPDATE OR IGNORE applications SET case_id = ? WHERE case_id = ?",
+                     (keep_id, r["id"]))
+        conn.execute("DELETE FROM applications WHERE case_id = ?", (r["id"],))
+        conn.execute("DELETE FROM cases WHERE id = ?", (r["id"],))
+
+
+def dedupe_cases(min_title_len: int = 6) -> dict[str, int]:
+    """表記ゆれ・二重登録された案件を1件に統合し、統計を返す。
+
+    実データで確認した重複の3類型を吸収する（件数カウンターの水増し防止）:
+      1. 公告（官公需API等）と落札実績（調達ポータル）の同一案件二重登録
+         → 落札者・落札価格を公告側へ移し、実績行を削除
+      2. 全角/半角・空白・括弧のゆれ（normalize_dedupe_key で同一になるもの）
+      3. 同一案件の再公告・締切変更で複数行残ったもの
+         → 締切が最も先（＝今生きている公告）の行へ統合
+
+    統合で消える行に申請(applications)が付いていれば生き残り行へ付け替える。
+    正規化後のタイトルが min_title_len 文字未満の短い汎用名は誤統合の恐れが
+    あるため対象外。毎日のDB再生成（update.py）の最終段で呼ぶ。
+    """
+    stats = {"award_merged": 0, "collapsed": 0, "removed": 0}
+    with _connect() as conn:
+        # 旧DB・手投入行の norm_key 未計算分を埋めてから重複を探す
+        backfill = conn.execute(
+            "SELECT id, title, agency FROM cases WHERE norm_key IS NULL OR norm_key = ''"
+        ).fetchall()
+        if backfill:
+            conn.executemany(
+                "UPDATE cases SET norm_key = ? WHERE id = ?",
+                [(normalize_dedupe_key(r["title"], r["agency"]), r["id"])
+                 for r in backfill])
+
+        dup_keys = [r[0] for r in conn.execute(
+            "SELECT norm_key FROM cases WHERE norm_key != '' "
+            "GROUP BY norm_key HAVING COUNT(*) > 1")]
+
+        for key in dup_keys:
+            if len(key.split("|", 1)[0]) < min_title_len:
+                continue
+            group = [dict(r) for r in conn.execute(
+                "SELECT * FROM cases WHERE norm_key = ?", (key,)).fetchall()]
+            awards = [r for r in group if r["source"] == AWARD_SOURCE]
+            announcements = [r for r in group if r["source"] != AWARD_SOURCE]
+
+            # 1) 公告があるなら、落札実績はその公告に吸収する（結果データで水増ししない）
+            if awards and announcements:
+                best = max(awards, key=lambda r: (bool(r["winner"]), r["id"]))
+                if best["winner"]:
+                    for a in announcements:
+                        if not a["winner"]:
+                            conn.execute(
+                                "UPDATE cases SET winner = ?, win_price = ? WHERE id = ?",
+                                (best["winner"], best["win_price"], a["id"]))
+                _absorb_case_rows(conn, awards, keep_id=announcements[0]["id"])
+                stats["award_merged"] += len(awards)
+                group = announcements
+
+            # 2)(3) 残りが複数なら1件に統合。締切が先→公告が新しい行を生き残りにする
+            if len(group) > 1:
+                survivor = max(group, key=lambda r: (
+                    r["deadline"] or "", r["announced_date"] or "", r["id"]))
+                losers = [r for r in group if r["id"] != survivor["id"]]
+                # 生き残り行の空フィールドは消える行の値で補完（情報を捨てない）
+                for f in ("winner", "win_price", "budget", "spec_url", "detail_url",
+                          "description", "announced_date", "bid_method", "category",
+                          "prefecture", "region"):
+                    if not survivor.get(f):
+                        v = next((lo[f] for lo in losers if lo.get(f)), "")
+                        if v:
+                            conn.execute(f"UPDATE cases SET {f} = ? WHERE id = ?",
+                                         (v, survivor["id"]))
+                if not survivor.get("budget_yen"):
+                    v = next((lo["budget_yen"] for lo in losers if lo.get("budget_yen")), 0)
+                    if v:
+                        conn.execute("UPDATE cases SET budget_yen = ? WHERE id = ?",
+                                     (v, survivor["id"]))
+                _absorb_case_rows(conn, losers, keep_id=survivor["id"])
+                stats["collapsed"] += len(losers)
+        conn.commit()
+    stats["removed"] = stats["award_merged"] + stats["collapsed"]
+    return stats
 
 
 def clear_cases(source: str | None = None) -> int:
