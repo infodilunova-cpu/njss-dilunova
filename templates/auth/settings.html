@@ -3,19 +3,34 @@
 
 {% block content %}
 <div class="topbar"><h1>設定</h1></div>
-<p class="lead">アカウントの管理（ログイン情報・パスワード変更・ログアウト）を行います。</p>
+<p class="lead">アカウントの管理（ログイン・ユーザー切替・パスワード変更・ログアウト）を行います。</p>
 
+{% if not current_user %}
+{# ---- 未ログイン: ログイン/新規登録へ誘導 ---- #}
+<section class="pf-block">
+  <h2>アカウント</h2>
+  <p class="pf-hint">現在ログインしていません。ログインすると、パスワード変更やユーザー切替が
+    ここでできるようになります。</p>
+  <div class="settings-actions">
+    <a class="btn primary" href="{{ url_for('auth.login', next=url_for('auth.settings')) }}">ログイン</a>
+    <a class="btn ghost" href="{{ url_for('auth.signup') }}">新規登録</a>
+  </div>
+</section>
+{% else %}
+{# ---- ログイン中: アカウント情報・切替・ログアウト ---- #}
 <section class="pf-block">
   <h2>アカウント</h2>
   <div class="pf-grid">
     <div class="pf-fld"><span>メールアドレス</span>
-      <p class="settings-value">{{ current_user.email if current_user else '—' }}</p></div>
+      <p class="settings-value">{{ current_user.email or '—' }}</p></div>
     <div class="pf-fld"><span>ログイン方法</span>
       <p class="settings-value">{{ 'Googleアカウント' if provider == 'google' else 'メール＋パスワード' }}</p></div>
   </div>
   <div class="settings-actions">
+    {# ユーザー変更 = 今のセッションを終了してログイン画面へ（別アカウントで入り直す） #}
+    <a class="btn primary" href="{{ url_for('auth.logout') }}">別のユーザーに切り替える</a>
     <a class="btn danger" href="{{ url_for('auth.logout') }}">ログアウト</a>
-    {% if current_user and current_user.is_admin %}
+    {% if current_user.is_admin %}
       <a class="btn ghost" href="{{ url_for('auth.admin_users') }}">ユーザー管理（管理者）</a>
     {% endif %}
   </div>
@@ -40,5 +55,15 @@
       <input type="password" name="new_password2" autocomplete="new-password" minlength="6" required></label>
     <button type="submit" class="btn primary">パスワードを変更する</button>
   </form>
+</section>
+{% endif %}
+
+<section class="pf-block">
+  <h2>会社・入札条件の設定</h2>
+  <p class="pf-hint">自社情報・保有資格・等級・対応エリアは「マイ条件」で登録します
+    （AIの参加資格判定 〇/△/✕ に使われます）。</p>
+  <div class="settings-actions">
+    <a class="btn ghost" href="{{ url_for('profile') }}">マイ条件を開く</a>
+  </div>
 </section>
 {% endblock %}

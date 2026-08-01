@@ -349,16 +349,19 @@ def logout():
 
 
 @auth_bp.route("/settings", methods=["GET", "POST"])
-@login_required
 def settings():
-    """アカウント設定 — パスワード変更・ログアウト。
+    """アカウント設定 — ログイン/登録・ユーザー切替・パスワード変更・ログアウト。
 
+    未ログインでも開ける（サイドバーに常設のため）。その場合はログイン/新規登録へ
+    誘導し、パスワード変更などの操作はログイン後に表示する。
     Googleログインのユーザーには「現在のパスワード」が存在しないため確認を
     省略し、設定するとメール＋パスワードでもログインできるようになる。
     メール登録のユーザーは、セッションを奪われただけでパスワードを変えられない
     よう現在のパスワードを再確認してから更新する。
     """
     u = current_user() or {}
+    if request.method == "POST" and not u:
+        return redirect(url_for("auth.login", next=url_for("auth.settings")))
     provider = (u.get("provider") or "email") if u.get("via") == "supabase" else "email"
     if request.method == "POST":
         cur = request.form.get("current_password", "")

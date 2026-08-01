@@ -22,9 +22,12 @@
     <div class="spacer"></div>
     <nav>
       <a href="{{ url_for('profile') }}" class="{{ 'active' if request.endpoint == 'profile' }}">マイ条件</a>
-      {% if current_user %}
+      {# 設定は常時表示（未ログインでも開け、中でログイン/登録へ誘導する） #}
       <a href="{{ url_for('auth.settings') }}" class="{{ 'active' if request.endpoint == 'auth.settings' }}">設定</a>
+      {% if current_user %}
       <a href="{{ url_for('auth.logout') }}" class="logout-link">ログアウト</a>
+      {% else %}
+      <a href="{{ url_for('auth.login') }}" class="{{ 'active' if request.endpoint == 'auth.login' }}">ログイン</a>
       {% endif %}
     </nav>
     <div class="side-foot">
