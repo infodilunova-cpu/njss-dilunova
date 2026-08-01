@@ -696,7 +696,8 @@ def profile():
             qualifications = json.loads(request.form.get("qualifications", "[]") or "[]")
         except (ValueError, TypeError):
             qualifications = []
-        db.save_profile(prefectures, ",".join(categories) or verticals.get(current_vertical())["default_categories"],
+        # 業種は選んだものだけ保存（未選択なら空のまま。旧版の「電気工事」強制は廃止）
+        db.save_profile(prefectures, ",".join(categories),
                         budget_max, grade, ",".join(quals), company=company,
                         representative=request.form.get("representative", "").strip(),
                         address=request.form.get("address", "").strip(),

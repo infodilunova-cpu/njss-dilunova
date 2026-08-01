@@ -84,7 +84,7 @@ CREATE TABLE IF NOT EXISTS profile (
     id            INTEGER PRIMARY KEY CHECK (id = 1),  -- 単一行
     company       TEXT DEFAULT '',   -- 自社名（競合一覧から自社を除外する）
     prefectures   TEXT DEFAULT '',   -- 対応エリア（都道府県, カンマ区切り）
-    categories    TEXT DEFAULT '電気工事',  -- 対応業種（カンマ区切り）
+    categories    TEXT DEFAULT '',   -- 対応業種（カンマ区切り。既定は空＝業種を決めつけない）
     budget_max    TEXT DEFAULT '',   -- 予算上限（予定価格がこれ以下）。空=制限なし
     grade         TEXT DEFAULT '',   -- 経審等級（A〜E, 参考）
     quals         TEXT DEFAULT '',   -- 保有資格メモ
@@ -201,11 +201,11 @@ STATUS_ALIASES: dict[str, str] = {
     "不参加": "NG",
 }
 
-# 担当者（bid-next-eta の G/$）。色も一致。
-ASSIGNEES: list[str] = ["社長", "金子さん", "上西さん", "未割当"]
+# 担当者の選択肢（汎用SaaSのため役職ベース。旧版の特定クライアント従業員名は撤去）。
+ASSIGNEES: list[str] = ["代表", "担当A", "担当B", "未割当"]
 ASSIGNEE_COLOR: dict[str, str] = {
-    "社長": "#16a34a", "金子さん": "#2563eb",
-    "上西さん": "#ea580c", "未割当": "#a8a29e",
+    "代表": "#16a34a", "担当A": "#2563eb",
+    "担当B": "#ea580c", "未割当": "#a8a29e",
 }
 
 # 工事カテゴリの色（bid-next-eta の V マップと一致）。
@@ -981,9 +981,16 @@ def restore_from_supa() -> dict[str, int]:
         # マイ条件
         prof = supa.load("profile")
         if isinstance(prof, dict) and (prof.get("company") or prof.get("qualifications")):
+            # 旧版が強制付与していた既定業種「電気工事」の残骸を掃除する:
+            # 資格・等級が何も無いのに業種だけ「電気工事」なら、ユーザーの選択ではなく
+            # 旧デフォルトとみなして空に戻す（AI判定が「自社=電気工事」と誤認しないように）。
+            cats = (prof.get("categories") or "").strip()
+            if (cats == "電気工事" and not (prof.get("grade") or prof.get("quals")
+                                            or prof.get("qualifications"))):
+                cats = ""
             save_profile(
                 prefectures=prof.get("prefectures", ""),
-                categories=prof.get("categories", "電気工事"),
+                categories=cats,
                 budget_max=prof.get("budget_max", ""),
                 grade=prof.get("grade", ""), quals=prof.get("quals", ""),
                 company=prof.get("company", ""), representative=prof.get("representative", ""),
@@ -1344,61 +1351,15 @@ def _hydrate_profile(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
-# 初期値（資格通知書PDFから抽出した川野電気の発注機関別 等級）。
-# 本番DBは毎日再生成され profile 行が消えるため、未設定時はこの既定値を表示・AI照合に使う。
-# (issuer, (elecCat,grade,score), (pipeCat,grade,score), valid, number, note)
-_DEFAULT_QUAL_MAIN = [
-    ("国土交通省（建設工事）", ("電気工事", "B", "621"), ("管工事", "B", "559"), "令和9年3月31日", "整理070100053", "国交省の建設工事資格"),
-    ("国土交通省（地方整備局・官庁営繕／一元化資格）", ("電気設備工事", "C", "621"), ("暖冷房衛生工事", "C", "559"), "令和9年3月31日", "業者86-0306424", "関東/近畿/中部/中国/四国/九州/東北/北陸整備局・国総研・営繕で共通。維持修繕/受変電/橋梁補修=532"),
-    ("法務省", ("電気工事", "C", "621"), ("管工事", "C", "559"), "令和9年3月31日", "登録60667", "大臣官房施設課"),
-    ("財務省 東海財務局", ("電気工事", "C", "621"), ("管工事", "C", "559"), "令和9年3月31日", "受付770045", "東海財務局/名古屋税関/名古屋国税局"),
-    ("財務省 福岡財務局", ("電気工事", "C", "621"), ("管工事", "C", "559"), "令和9年3月31日", "受付120069", "福岡財務支局/門司・長崎税関/福岡国税局"),
-    ("財務省 中国財務局", ("電気工事", "C", "621"), ("管工事", "C", "559"), "令和9年3月31日", "受付700169", "中国財務局/広島国税局"),
-    ("財務省 四国財務局", ("電気工事", "C", "621"), ("管工事", "C", "559"), "令和9年3月31日", "受付875544", "四国財務局/高松国税局"),
-    ("文部科学省", ("電気工事", "C", "621"), ("管工事", "C", "559"), "令和7・8年度", "受付770819", "文教施設企画・防災部"),
-    ("厚生労働省", ("電気", "D", "621"), ("管", "D", "559"), "令和9年3月31日", "登録115-260059", "全国ブロック。※C相当点でもD等級"),
-    ("環境省", ("電気設備工事", "C", "621"), ("機械設備工事", "C", "559"), "令和9年3月31日", "登録001-000448", "全国"),
-    ("総務省", ("電気", "C", "621"), ("管", "C", "559"), "令和9年3月31日", "受付0700101545", ""),
-    ("農林水産省（大臣官房）", ("電気工事", "C", "621"), ("管工事", "C", "559"), "令和9年3月31日", "登録00451", ""),
-    ("経済産業省（近畿経済産業局）", ("電気", "C", "621"), ("管", "C", "559"), "令和9年3月31日", "登録0803170079", "全国地区"),
-    ("防衛省", ("電気", "C", "621"), ("管", "C", "559"), "令和9年3月31日", "登録2-06-04701", "整備計画局"),
-    ("沖縄総合事務局", ("電気設備工事", "C", "621"), ("暖冷房衛生設備工事", "C", "559"), "令和9年3月31日", "業者180571", "受変電532"),
-    ("衆議院", ("電気工事", "C", "621"), ("管工事", "C", "559"), "令和9年3月31日", "登録3125", ""),
-    ("参議院", ("電気工事", "C", ""), ("管工事", "C", ""), "令和9年3月31日", "登録1562", ""),
-    ("最高裁判所", ("電気", "C", "621"), ("管", "C", "559"), "令和9年3月31日", "業者0062555/受付16889", ""),
-    ("独立行政法人 都市再生機構（UR）", ("電気工事", "C", "621"), ("管工事", "C", "559"), "2027年3月31日", "登録0217290", "関西地区"),
-    ("独立行政法人 水資源機構", ("電気", "", "621"), ("管", "", "559"), "令和9年3月31日", "業者152064", "等級表記○/順位3381"),
-    ("大阪府", ("電気工事", "D", "692"), ("管工事", "D", "593"), "令和9年3月31日", "業者7094979", "等級・点数は令和8/3/31まで有効"),
-    ("八尾市", ("電気工事", "D", "592"), ("管工事", "D", "493"), "令和7年度", "市内業者", "格付表"),
-]
-_DEFAULT_QUAL_NOGRADE = [
-    ("農林水産省 各地方農政局", "令和9年3月31日", "登録20250C…", "関東/近畿/九州/中国四国/東海/東北/北陸。電気・管=有資格（格付なし）"),
-    ("林野庁（近畿中国森林管理局）", "令和9年3月31日", "登録N09865", "電気・管=有資格（格付なし）"),
-    ("外務省", "令和9年3月31日", "登録070800100678", "電気・管=有資格（格付なし）"),
-]
-
-
-def default_qualifications() -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for issuer, e, m, valid, num, note in _DEFAULT_QUAL_MAIN:
-        out.append({"issuer": issuer, "category": e[0], "grade": e[1], "score": e[2],
-                    "valid_until": valid, "number": num, "note": note})
-        out.append({"issuer": issuer, "category": m[0], "grade": m[1], "score": m[2],
-                    "valid_until": valid, "number": num, "note": ""})
-    for issuer, valid, num, note in _DEFAULT_QUAL_NOGRADE:
-        out.append({"issuer": issuer, "category": "電気工事/管工事", "grade": "", "score": "",
-                    "valid_until": valid, "number": num, "note": note})
-    return out
-
-
 def default_profile() -> dict[str, Any]:
-    """初期プロフィール（汎用・空）。会社情報や等級はアカウントごとに後から登録する。
+    """初期プロフィール（汎用・完全に白紙）。会社情報・業種・等級はアカウントごとに登録する。
 
-    ※特定クライアント固有の初期値はここに入れない（業種テンプレは汎用）。
+    ※特定クライアント固有の初期値はここに入れない（旧版にあった川野電気の等級既定値と
+      業種「電気工事」の決め打ちは撤去済み。本ツールは別物の汎用SaaSとして扱う）。
     """
     return {
         "id": 1, "company": "", "representative": "", "address": "", "corp_number": "",
-        "prefectures": "", "categories": "電気工事", "budget_max": "",
+        "prefectures": "", "categories": "", "budget_max": "",
         "grade": "", "quals": "", "qualifications": [],
     }
 
@@ -1409,15 +1370,7 @@ def get_profile() -> dict[str, Any]:
         row = conn.execute("SELECT * FROM profile WHERE id = 1").fetchone()
     if not row:
         return default_profile()
-    p = _hydrate_profile(dict(row))
-    # 等級が空のままの行は補完しない（汎用・空が正）。
-    if False and not p.get("qualifications"):
-        d = default_profile()
-        p["qualifications"] = d["qualifications"]
-        for k in ("company", "representative", "address", "corp_number", "grade"):
-            if not p.get(k):
-                p[k] = d[k]
-    return p
+    return _hydrate_profile(dict(row))
 
 
 def _normalize_qualifications(quals: Any) -> str:
