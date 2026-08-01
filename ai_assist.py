@@ -77,6 +77,57 @@ def _fetch_pdf_text(url: str, timeout: int = 25) -> str:
             return ""
 
 
+def _fetch_notice(url: str, title: str = "") -> tuple[str, list[dict]]:
+    """公告の本文と配布ファイルリンクを取得する（コードで直接読みに行く層）。
+
+    優先順: ① PDF直リンクなら全文抽出 ② HTMLページなら本文＋様式/資料リンクを収集し、
+    公告/仕様書らしきPDFが貼られていれば1本だけ読み足す。
+    【重要ガード】案件名がページ内に見つからないHTMLは「ポータルの汎用ページ」と
+    みなし本文採用しない（官公需APIのdetail_urlは汎用ページのことが多く、
+    それをAIに読ませると公告本文と誤認してノイズになるため）。
+    返り値: (本文テキスト, links[{label,url,kind}])。取れなければ ("", [])。
+    """
+    text = _fetch_pdf_text(url)
+    if text:
+        return text, []
+    try:
+        import notice_fetch
+        page = notice_fetch.fetch(url)
+    except Exception:  # noqa: BLE001
+        return "", []
+    text = (page.get("text") or "")[:_PDF_MAX_CHARS]
+    links = page.get("links") or []
+    if not text and not links:
+        return "", []
+    # 汎用ページ判定: 案件名（先頭12字・空白無視）がページ内に無ければ公告ではない
+    import unicodedata as _ud
+    import re as _re2
+    probe = _re2.sub(r"\s", "", _ud.normalize("NFKC", title or ""))[:12]
+    page_flat = _re2.sub(r"\s", "", _ud.normalize("NFKC", text))
+    if probe and probe not in page_flat:
+        return "", [l for l in links if l.get("kind") == "form"]
+    # 公告・説明書・仕様書らしきPDFがあれば、最も本文らしい1本を読み足す
+    import re as _re
+    for l in links:
+        if l["url"].lower().endswith(".pdf") and _re.search(r"公告|公示|説明|仕様", l["label"]):
+            pdf = _fetch_pdf_text(l["url"])
+            if pdf:
+                text = (text + f"\n\n# リンク先PDF（{l['label']}）\n" + pdf)[:_PDF_MAX_CHARS]
+            break
+    return text, links
+
+
+def _links_lines(links: list[dict] | None) -> str:
+    """公告ページの配布ファイル一覧をプロンプト用テキストにする（実在リンク＝元ネタ）。"""
+    if not links:
+        return "（配布ファイルは検出できず）"
+    out = []
+    for l in links[:20]:
+        kind = "様式" if l.get("kind") == "form" else "資料"
+        out.append(f"- [{kind}] {l.get('label','')}")
+    return "\n".join(out)
+
+
 def _load_env() -> None:
     """.env（gitignore済）があれば、未設定のキーだけ os.environ に読み込む。
 
@@ -350,8 +401,8 @@ def assist(case: dict, profile: dict | None = None,
         except Exception:  # noqa: BLE001 — 土台が無くてもAIは動かす
             requirements = None
 
-    # タップ時に公告PDFの全文を取得してAIに読ませる（取れなければ説明文にフォールバック）。
-    notice_text = _fetch_pdf_text(case.get("detail_url", ""))
+    # タップ時に公告（PDF全文 or HTMLページ＋リンク先PDF）をコードで取得してAIに読ませる。
+    notice_text, _links = _fetch_notice(case.get("detail_url", ""), case.get("title", ""))
     data = _call_gemini(_build_user_text(case, profile, requirements, notice_text))
     # 判定ポリシーを最終適用（登録情報なし→△固定、根拠なし✕→△。AI任せにしない）
     data["eligibility"] = apply_verdict_policy(
@@ -541,7 +592,7 @@ def bid_plan(case: dict, profile: dict | None = None,
         except Exception:  # noqa: BLE001 — 土台が無くてもAIは動かす
             requirements = None
 
-    notice_text = _fetch_pdf_text(case.get("detail_url", ""))
+    notice_text, _links = _fetch_notice(case.get("detail_url", ""), case.get("title", ""))
     text = _build_plan_text(case, profile, requirements, price_guide, notice_text,
                             past_awards=past_awards)
     try:
@@ -649,7 +700,7 @@ def doc_draft(case: dict, doc_name: str, profile: dict | None = None,
         except Exception:  # noqa: BLE001 — 土台が無くてもAIは動かす
             requirements = None
 
-    notice_text = _fetch_pdf_text(case.get("detail_url", ""))
+    notice_text, links = _fetch_notice(case.get("detail_url", ""), case.get("title", ""))
     desc = (notice_text or case.get("description") or "").strip()
     src_label = "公告全文（PDFから取得）" if notice_text else "公告本文（抜粋）"
     text = (
@@ -661,6 +712,9 @@ def doc_draft(case: dict, doc_name: str, profile: dict | None = None,
         f"# {src_label}\n{desc or '（本文なし。様式は一般形で作成し、公告での確認を促すこと）'}\n\n"
         "# 確定的に算出済みの必要書類の情報\n"
         f"{_requirements_lines(requirements)}\n\n"
+        "# 公告ページで実際に配布されているファイル一覧（コードで収集した実在リスト。\n"
+        "#  official_format はこの中に該当様式があればそれを名指しし、無ければ無いと書くこと）\n"
+        f"{_links_lines(links)}\n\n"
         "# 自社（マイ条件。ここにある事実は該当欄へ自動入力すること）\n"
         f"{_profile_lines(profile)}\n"
     )
@@ -671,6 +725,8 @@ def doc_draft(case: dict, doc_name: str, profile: dict | None = None,
     if not isinstance(data, dict):
         return {"enabled": True, "error": "AI応答が想定外の形式でした"}
     data = _postfill_doc_fields(data, profile)
+    # 様式らしき実在ファイルのリンクを添付（AIの推測ではなくコードで収集したもの）
+    data["form_links"] = [l for l in links if l.get("kind") == "form"][:8]
     data["enabled"] = True
     data["model"] = _model()
     data["source"] = "pdf_full" if notice_text else "description"

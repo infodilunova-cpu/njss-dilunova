@@ -514,6 +514,39 @@ def case_doc_draft(case_id: int):
     return jsonify(result)
 
 
+@app.route("/case/<int:case_id>/notice-assets", methods=["POST"])
+def case_notice_assets(case_id: int):
+    """公告ページから様式・資料ファイルのリンクをコードで収集して返す（非AI）。
+
+    結果は案件共有でキャッシュ（誰が取っても同じ）。?refresh=1 で再収集。
+    """
+    import json
+    case = db.get_case(case_id)
+    if not case:
+        abort(404)
+    ext = case.get("external_id", "")
+    refresh = request.args.get("refresh") == "1"
+    key = "assets:" + ext
+    if not refresh and ext:
+        cached = db.get_ai_assist(key, user="")
+        if cached:
+            data = json.loads(cached["payload"])
+            data["cached"] = True
+            return jsonify(data)
+    import notice_fetch
+    url = case.get("detail_url", "")
+    page = notice_fetch.fetch(url) if url else {"text": "", "links": []}
+    result = {"ok": True, "links": page.get("links") or [],
+              "source_url": url,
+              "note": ("" if page.get("links")
+                       else "公告ページから配布ファイルを検出できませんでした。"
+                            "公告リンク先で直接確認してください。")}
+    if ext:
+        db.set_ai_assist(key, json.dumps(result, ensure_ascii=False), user="")
+    result["cached"] = False
+    return jsonify(result)
+
+
 @app.route("/case/<int:case_id>/doc-status", methods=["GET", "POST"])
 def case_doc_status(case_id: int):
     """提出書類のチェック状態（これ提出した/まだ）のユーザー別 取得・保存。"""

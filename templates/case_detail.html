@@ -78,6 +78,15 @@
     <div id="aiResult" class="ai-result" hidden></div>
   </section>
 
+  {# 様式・資料ファイル（公告ページからコードで自動収集・非AI）。
+     書類作成の「元ネタ」は推測ではなく実在ファイルを直接読みに行く。 #}
+  <section class="guide-box" id="assetsBox" data-case-id="{{ c.id }}">
+    <h2>様式・資料ファイル（公告ページから自動収集）</h2>
+    <p class="pg-note muted small">発注機関が配布している様式（Word/Excel）や公告・仕様書PDFのリンクを、公告ページから直接探します。</p>
+    <button type="button" class="btn ghost small" id="assetsRun">様式・資料を探す</button>
+    <div id="assetsOut" hidden></div>
+  </section>
+
   {% if past_awards %}
   {# 過去の同名・類似案件の落札実績（非AI・確定値）。毎年出る定例案件の
      「前回いくらで・どこが落札したか」は入札額の最有力の参考情報。 #}
@@ -301,6 +310,43 @@
 
 {% block scripts %}
 <script id="initialPartners" type="application/json">{{ (application.partners if application else []) | tojson }}</script>
+<script>
+/* 様式・資料ファイルの自動収集（非AI・公告ページをコードで読む） */
+(function () {
+  var box = document.getElementById('assetsBox');
+  if (!box) return;
+  var btn = document.getElementById('assetsRun');
+  var out = document.getElementById('assetsOut');
+  var esc = function (s) {
+    var d = document.createElement('div'); d.textContent = (s == null ? '' : s); return d.innerHTML;
+  };
+  btn.addEventListener('click', function () {
+    out.hidden = false;
+    out.innerHTML = '<p class="muted small">公告ページを読みに行っています…</p>';
+    btn.disabled = true;
+    fetch('/case/' + box.getAttribute('data-case-id') + '/notice-assets', { method: 'POST' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        var links = d.links || [];
+        if (!links.length) {
+          out.innerHTML = '<p class="muted small">' + esc(d.note || '配布ファイルは見つかりませんでした。') + '</p>';
+          return;
+        }
+        var forms = links.filter(function (l) { return l.kind === 'form'; });
+        var docs = links.filter(function (l) { return l.kind !== 'form'; });
+        var html = '';
+        var item = function (l) {
+          return '<li><a href="' + encodeURI(l.url) + '" target="_blank" rel="noopener">' + esc(l.label) + '</a></li>';
+        };
+        if (forms.length) html += '<h4>様式（記入して提出するファイル）</h4><ul>' + forms.map(item).join('') + '</ul>';
+        if (docs.length) html += '<h4>資料（公告・仕様書など）</h4><ul>' + docs.map(item).join('') + '</ul>';
+        out.innerHTML = html;
+      })
+      .catch(function () { out.innerHTML = '<p class="muted small">取得に失敗しました。再度お試しください。</p>'; })
+      .finally(function () { btn.disabled = false; btn.textContent = 'もう一度探す'; });
+  });
+})();
+</script>
 <script>
 /* 協力会社の見積を行として動的に編集する。送信時にJSON化して hidden(#partnersInput) に詰める。
    1案件に複数社を登録し、各社 {company, amount, requested, replied, note} を持つ。 */
@@ -682,6 +728,13 @@
     var html = '';
     if (d.official_format) {
       html += '<p class="doc-format"><strong>様式について:</strong> ' + esc(d.official_format) + '</p>';
+    }
+    if (d.form_links && d.form_links.length) {
+      // コードで公告ページから収集した実在の様式ファイル（AIの推測ではない）
+      html += '<div class="doc-sec"><h4>配布されている様式ファイル（公告ページから自動収集）</h4><ul>'
+        + d.form_links.map(function (l) {
+            return '<li><a href="' + encodeURI(l.url) + '" target="_blank" rel="noopener">' + esc(l.label) + '</a></li>';
+          }).join('') + '</ul></div>';
     }
     var fields = d.fields || [];
     var filled = fields.filter(function (f) { return f.value; });
