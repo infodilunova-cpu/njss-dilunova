@@ -618,6 +618,49 @@ def case_bid_plan(case_id: int):
     return jsonify(result)
 
 
+# save-output で既存申請から引き継ぐ項目（フォーム管理項目すべて）
+_APP_KEEP_FIELDS = (
+    "applied_date", "note", "assignee", "apply_deadline", "bid_deadline",
+    "open_date", "submit_method", "work", "materials", "flag", "needs_check",
+    "bid_plan", "win_amount", "award_called", "partner", "partners",
+    "agency_override")
+
+
+@app.route("/case/<int:case_id>/save-output", methods=["POST"])
+def case_save_output(case_id: int):
+    """AIアウトプット（判定/プラン/書類下書き）を案件管理（申請）に保存する。
+
+    申請行が無ければ既定ステータスで自動作成する（＝案件管理に載る）。
+    同じ kind+title は上書き。{delete: true} で削除。
+    保存内容は申請データと一緒に Supabase へ永続化される（デプロイ跨ぎで残る）。
+    """
+    if not db.get_case(case_id):
+        abort(404)
+    u = auth.current_email()
+    body = request.get_json(silent=True) or {}
+    kind = str(body.get("kind", "")).strip()
+    title = str(body.get("title", "")).strip()[:120]
+    content = str(body.get("content", ""))[:30000]
+    delete = bool(body.get("delete"))
+    if kind not in ("assist", "plan", "doc") or not title or (not content and not delete):
+        return jsonify({"ok": False, "error": "kind/title/content が不正です"}), 400
+
+    cur = db.get_application(case_id, user=u) or {}
+    outputs = [o for o in (cur.get("saved_outputs") or [])
+               if not (o.get("kind") == kind and o.get("title") == title)]
+    if not delete:
+        outputs.append({"kind": kind, "title": title, "content": content,
+                        "saved_at": date.today().isoformat()})
+    fields = {k: cur.get(k) for k in _APP_KEEP_FIELDS}
+    fields["saved_outputs"] = outputs
+    status = cur.get("status") or "参加申請準備前"
+    try:
+        db.set_application(case_id, status, user=u, **fields)
+    except ValueError:
+        return jsonify({"ok": False, "error": "保存に失敗しました"}), 400
+    return jsonify({"ok": True, "count": len(outputs), "created": not cur})
+
+
 @app.route("/case/<int:case_id>/apply", methods=["POST"])
 def apply_case(case_id: int):
     """案件の入札参加申請ステータスを登録・更新する。"""
@@ -672,6 +715,8 @@ def apply_case(case_id: int):
         "award_called": flag("award_called"),
         "partner": text("partner"),
         "partners": partners,
+        # 保存したAIアウトプットはフォーム管理外＝常に既存値を引き継ぐ（消さない）
+        "saved_outputs": cur.get("saved_outputs") or [],
     }
     is_ajax = bool(f.get("ajax") or request.headers.get("X-Requested-With") == "fetch")
     try:

@@ -81,6 +81,27 @@ def test_exclusions_and_companies_are_isolated():
     assert [c["name"] for c in db.list_companies(user=B)] == ["B社"]
 
 
+def test_saved_outputs_roundtrip_and_isolation():
+    """AIアウトプットの保存が申請に載り、ユーザー間で混ざらず、他項目更新でも消えない。"""
+    _fresh_db("outputs")
+    db.upsert_cases([_case("O1", "AI出力保存テスト案件")])
+    cid = db.get_case_id_by_external("O1")
+    outs = [{"kind": "plan", "title": "入札準備プラン", "content": "スケジュール…", "saved_at": "2026-08-01"}]
+    db.set_application(cid, "参加申請準備前", user=A, saved_outputs=outs)
+    got = db.get_application(cid, user=A)
+    assert got["saved_outputs"][0]["title"] == "入札準備プラン"
+    assert db.get_application(cid, user=B) is None  # Bには存在しない
+    # 既存値を渡して他項目を更新すれば保存分は残る（apply/save-outputの引き継ぎ規約）
+    db.set_application(cid, "入札参加申請済み", user=A,
+                       note="更新", saved_outputs=got["saved_outputs"])
+    got2 = db.get_application(cid, user=A)
+    assert got2["note"] == "更新" and len(got2["saved_outputs"]) == 1
+    # 不正kindは弾かれる
+    db.set_application(cid, "入札参加申請済み", user=A,
+                       saved_outputs=[{"kind": "hack", "title": "x", "content": "y"}])
+    assert db.get_application(cid, user=A)["saved_outputs"] == []
+
+
 def test_user_key_is_normalized():
     """メールは大文字小文字・前後空白を吸収して同一ユーザー扱い。"""
     _fresh_db("norm")

@@ -243,6 +243,24 @@
       <p class="muted">まだ管理に登録されていません。</p>
     {% endif %}
 
+    {% if application and application.saved_outputs %}
+    {# 各段階で保存したAIアウトプット（判定/プラン/書類下書き）。申請と一緒に永続化 #}
+    <div class="saved-outputs">
+      <h3>保存したAIアウトプット</h3>
+      {% for o in application.saved_outputs %}
+      <details class="saved-output">
+        <summary>
+          <span class="tag">{{ {'assist': 'AI判定', 'plan': '入札準備プラン', 'doc': '書類下書き'}.get(o.kind, o.kind) }}</span>
+          {{ o.title }} <span class="muted small">{{ o.saved_at }}</span>
+        </summary>
+        <pre class="saved-output-body">{{ o.content }}</pre>
+        <button type="button" class="btn small ghost saved-output-del"
+                data-kind="{{ o.kind }}" data-title="{{ o.title }}">削除</button>
+      </details>
+      {% endfor %}
+    </div>
+    {% endif %}
+
     <form class="apply-form grid" method="post" action="{{ url_for('apply_case', case_id=c.id) }}"
           data-ext="{{ c.external_id }}">
       <label>
@@ -310,6 +328,41 @@
 
 {% block scripts %}
 <script id="initialPartners" type="application/json">{{ (application.partners if application else []) | tojson }}</script>
+<script>
+/* AIアウトプットを案件管理（申請）へ保存する共通ヘルパ。
+   保存すると申請行が自動作成され、Supabase経由でデプロイを跨いで残る。 */
+window.dlnSaveOutput = function (caseId, kind, title, content, btn) {
+  var orig = btn.textContent;
+  btn.disabled = true;
+  fetch('/case/' + caseId + '/save-output', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ kind: kind, title: title, content: content })
+  }).then(function (r) { return r.json(); })
+    .then(function (d) { btn.textContent = d.ok ? '案件管理に保存しました ✓' : '保存に失敗しました'; })
+    .catch(function () { btn.textContent = '保存に失敗しました'; })
+    .finally(function () {
+      btn.disabled = false;
+      setTimeout(function () { btn.textContent = orig; }, 2500);
+    });
+};
+
+/* 保存済みアウトプットの削除（サーバレンダリング分） */
+(function () {
+  var caseId = {{ c.id }};
+  document.querySelectorAll('.saved-output-del').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      btn.disabled = true;
+      fetch('/case/' + caseId + '/save-output', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: btn.getAttribute('data-kind'),
+                               title: btn.getAttribute('data-title'), delete: true })
+      }).then(function (r) { return r.json(); })
+        .then(function (d) { if (d.ok) btn.closest('details').remove(); })
+        .catch(function () { btn.disabled = false; });
+    });
+  });
+})();
+</script>
 <script>
 /* 様式・資料ファイルの自動収集（非AI・公告ページをコードで読む） */
 (function () {
@@ -494,10 +547,15 @@
     if (d.cautions && d.cautions.length) {
       html += '<div class="ai-block"><h3>注意点</h3>' + ul(d.cautions) + '</div>';
     }
+    html += '<div class="ai-next"><button type="button" class="btn small ghost" id="aiSaveOut">この判定結果を案件管理に保存</button></div>';
     html += '<p class="ai-foot muted">'
       + 'AIで出した結果です。最終確認は必ず公告原本で行ってください。'
       + ' <a href="#" id="aiRefresh">再生成</a></p>';
     out.innerHTML = html;
+    var sv = document.getElementById('aiSaveOut');
+    if (sv) sv.addEventListener('click', function () {
+      window.dlnSaveOutput(caseId, 'assist', 'AI判定結果', assistText(d), sv);
+    });
     var rf = document.getElementById('aiRefresh');
     if (rf) rf.addEventListener('click', function (e) { e.preventDefault(); run(true); });
     // 判定〇/△のとき: 隠している入札準備プランを開いてそのまま生成まで進める（動線の続き）
@@ -541,6 +599,25 @@
       if (typeof form.requestSubmit === 'function') form.requestSubmit(); else form.submit();
     });
   }
+  /* 判定結果を案件管理へ保存するためのテキスト化 */
+  function assistText(d) {
+    var L = [];
+    L.push('【要点】');
+    (d.summary || []).forEach(function (s) { L.push('・' + s); });
+    var e = d.eligibility || {};
+    L.push('', '【参加資格の適合】' + (e.verdict || '不明'));
+    (e.reasons || []).forEach(function (r) { L.push('・' + r); });
+    L.push('', '【必要書類】');
+    (d.documents || []).forEach(function (x) { L.push('・' + x); });
+    L.push('', '【やること】');
+    (d.todo || []).forEach(function (t, i) { L.push((i + 1) + '. ' + t.title + (t.detail ? '：' + t.detail : '')); });
+    if (d.cautions && d.cautions.length) {
+      L.push('', '【注意点】');
+      d.cautions.forEach(function (c) { L.push('・' + c); });
+    }
+    return L.join('\n');
+  }
+
   function run(refresh) {
     out.hidden = false;
     out.innerHTML = '<div class="ai-loading">'
@@ -647,10 +724,15 @@
     if (d.risks && d.risks.length) {
       html += '<div class="ai-block"><h3>つまずきやすいポイント</h3>' + ul(d.risks) + '</div>';
     }
+    html += '<div class="ai-next"><button type="button" class="btn small ghost" id="planSaveOut">このプランを案件管理に保存</button></div>';
     html += '<p class="ai-foot muted">'
       + 'AIで出した結果です。日付・金額は必ず公告原本で確認してください。'
       + ' <a href="#" id="planRefresh">再生成</a></p>';
     out.innerHTML = html;
+    var psv = document.getElementById('planSaveOut');
+    if (psv) psv.addEventListener('click', function () {
+      window.dlnSaveOutput(caseId, 'plan', '入札準備プラン', planText(d), psv);
+    });
 
     var cp = document.getElementById('planCopy');
     if (cp) cp.addEventListener('click', function () {
@@ -669,6 +751,29 @@
     var rf = document.getElementById('planRefresh');
     if (rf) rf.addEventListener('click', function (e) { e.preventDefault(); run(true); });
     bindDocs(d.documents || []);
+  }
+
+  /* プランを案件管理へ保存するためのテキスト化 */
+  function planText(d) {
+    var L = [];
+    if (d.next_action) L.push('【今日の一歩】' + d.next_action, '');
+    if (d.schedule && d.schedule.length) {
+      L.push('【スケジュール】');
+      d.schedule.forEach(function (s) { L.push('・' + s.date + ' ' + s.action); });
+      L.push('');
+    }
+    if (d.documents && d.documents.length) {
+      L.push('【提出書類】');
+      d.documents.forEach(function (x) { L.push('・' + x); });
+      L.push('');
+    }
+    if (d.draft) L.push('【自社紹介文の下書き】', d.draft, '');
+    if (d.price_hint) L.push('【入札額の考え方】', d.price_hint, '');
+    if (d.risks && d.risks.length) {
+      L.push('【つまずきやすいポイント】');
+      d.risks.forEach(function (r) { L.push('・' + r); });
+    }
+    return L.join('\n');
   }
 
   /* 提出書類: チェック状態のサーバ保存＋「この書類を作る」（AIドラフト生成） */
@@ -754,13 +859,31 @@
     if (d.body) {
       html += '<div class="doc-sec"><h4>下書き（そのまま書き写せます。【 】は要記入）</h4>'
         + '<textarea class="doc-body" rows="14" readonly>' + esc(d.body) + '</textarea>'
-        + '<button type="button" class="btn small doc-copy">下書きをコピー</button></div>';
+        + '<button type="button" class="btn small doc-copy">下書きをコピー</button> '
+        + '<button type="button" class="btn small ghost doc-save">この下書きを案件管理に保存</button></div>';
     }
     if (d.notes && d.notes.length) {
       html += '<div class="doc-sec"><h4>提出前の注意</h4>' + ul(d.notes) + '</div>';
     }
     html += '<p class="ai-foot muted">AIが公告とマイ条件から作成した下書きです。提出前に必ず公式様式・公告原本と突き合わせてください。</p>';
     slot.innerHTML = html;
+    var dsv = slot.querySelector('.doc-save');
+    if (dsv) dsv.addEventListener('click', function () {
+      var L = [];
+      if (d.official_format) L.push('【様式について】' + d.official_format, '');
+      var todos = (d.fields || []).filter(function (f) { return !f.value; });
+      if (todos.length) {
+        L.push('【用意する項目】');
+        todos.forEach(function (f) { L.push('・' + f.label + (f.todo ? ' — ' + f.todo : '')); });
+        L.push('');
+      }
+      L.push('【下書き】', d.body || '');
+      if (d.notes && d.notes.length) {
+        L.push('', '【提出前の注意】');
+        d.notes.forEach(function (n) { L.push('・' + n); });
+      }
+      window.dlnSaveOutput(caseId, 'doc', '書類下書き: ' + name, L.join('\n'), dsv);
+    });
     var cp = slot.querySelector('.doc-copy');
     if (cp) cp.addEventListener('click', function () {
       var text = d.body || '';

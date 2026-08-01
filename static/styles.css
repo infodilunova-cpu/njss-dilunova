@@ -681,6 +681,16 @@ tr.row-check td { background: #fffaf0; }
 .doc-format { font-size: 12.5px; background: #fffbeb; border: 1px solid #fde68a;
   padding: 6px 8px; border-radius: 6px; }
 
+/* 保存したAIアウトプット（申請管理と一緒に永続化） */
+.saved-outputs { margin-top: 14px; }
+.saved-outputs h3 { margin: 0 0 6px; font-size: 13.5px; }
+.saved-output { border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; margin-bottom: 6px; background: #fff; }
+.saved-output summary { cursor: pointer; font-size: 13px; }
+.saved-output-body { white-space: pre-wrap; font-family: inherit; font-size: 12.5px;
+  line-height: 1.6; background: var(--bg, #f8fafc); border-radius: 6px;
+  padding: 8px 10px; margin: 8px 0; max-height: 340px; overflow-y: auto; }
+
 /* 設定画面（アカウント・パスワード変更・ログアウト） */
 .btn.danger { background: #dc2626; color: #fff; border-color: #dc2626; }
 .btn.danger:hover { background: #b91c1c; border-color: #b91c1c; }

@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS applications (
     partner        TEXT DEFAULT '',                 -- 発注先の協力会社（採用見積の会社名）
     partners       TEXT DEFAULT '[]',               -- 協力会社見積（quotes・JSON配列）
     agency_override TEXT DEFAULT '',                -- 元機関(発注機関)の上書き（案件のagency修正用）
+    saved_outputs  TEXT DEFAULT '[]',               -- 保存したAIアウトプット（判定/プラン/書類・JSON配列）
     updated_at     TEXT DEFAULT (datetime('now')),
     PRIMARY KEY (user_email, case_id)
 );
@@ -331,6 +332,7 @@ def init_db() -> None:
             ("partner",        "TEXT DEFAULT ''"),
             ("partners",       "TEXT DEFAULT '[]'"),
             ("agency_override", "TEXT DEFAULT ''"),
+            ("saved_outputs",  "TEXT DEFAULT '[]'"),
         ):
             if col not in app_cols:
                 conn.execute(f"ALTER TABLE applications ADD COLUMN {col} {ddl}")
@@ -973,6 +975,36 @@ def _normalize_partners(partners: Any) -> str:
     return json.dumps(cleaned, ensure_ascii=False)
 
 
+def _normalize_saved_outputs(outputs: Any) -> str:
+    """保存したAIアウトプットを検証してJSON文字列にする。
+
+    各項目 {kind: assist/plan/doc, title, content, saved_at}。
+    件数30・本文3万字で上限（申請データと一緒にSupabaseへ永続化されるため肥大防止）。
+    """
+    import json
+    if isinstance(outputs, str):
+        try:
+            items = json.loads(outputs or "[]")
+        except (ValueError, TypeError):
+            items = []
+    elif isinstance(outputs, list):
+        items = outputs
+    else:
+        items = []
+    cleaned: list[dict[str, Any]] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        kind = str(it.get("kind", "")).strip()
+        title = str(it.get("title", "")).strip()[:120]
+        content = str(it.get("content", ""))[:30000]
+        if kind not in ("assist", "plan", "doc") or not title or not content:
+            continue
+        cleaned.append({"kind": kind, "title": title, "content": content,
+                        "saved_at": str(it.get("saved_at", "")).strip()[:20]})
+    return json.dumps(cleaned[-30:], ensure_ascii=False)
+
+
 # set_application が受け付ける列（case_id/status 以外）。型変換つき。
 _APP_TEXT_FIELDS = (
     "applied_date", "note", "assignee", "apply_deadline", "bid_deadline",
@@ -1064,7 +1096,8 @@ def _restore_applications(user: str, apps: Any) -> int:
         fields = {k: it.get(k) for k in (
             "applied_date", "note", "assignee", "apply_deadline", "bid_deadline",
             "open_date", "submit_method", "work", "materials", "flag",
-            "needs_check", "bid_plan", "win_amount", "award_called", "partner", "partners")}
+            "needs_check", "bid_plan", "win_amount", "award_called", "partner",
+            "partners", "saved_outputs")}
         try:
             set_application(cid, it.get("status") or "参加申請準備前", user=user, **fields)
             n += 1
@@ -1174,6 +1207,8 @@ def set_application(case_id: int, status: str, user: str = "", **fields: Any) ->
         vals.append(_int(fields.get(f, 0)))
     cols.append("partners")
     vals.append(_normalize_partners(fields.get("partners", [])))
+    cols.append("saved_outputs")
+    vals.append(_normalize_saved_outputs(fields.get("saved_outputs", [])))
 
     set_clause = ", ".join(f"{c}=excluded.{c}" for c in cols)
     placeholders = ", ".join(["?"] * (len(cols) + 2))  # +user_email +case_id
@@ -1190,12 +1225,13 @@ def set_application(case_id: int, status: str, user: str = "", **fields: Any) ->
 
 
 def _hydrate_application(row: dict[str, Any]) -> dict[str, Any]:
-    """DB行の partners(JSON文字列) を list に展開して返す。"""
+    """DB行の partners / saved_outputs (JSON文字列) を list に展開して返す。"""
     import json
-    try:
-        row["partners"] = json.loads(row.get("partners") or "[]")
-    except (ValueError, TypeError):
-        row["partners"] = []
+    for k in ("partners", "saved_outputs"):
+        try:
+            row[k] = json.loads(row.get(k) or "[]")
+        except (ValueError, TypeError):
+            row[k] = []
     return row
 
 
