@@ -136,7 +136,7 @@ auth.init_auth_db()
 app.register_blueprint(auth.auth_bp)
 
 # ログイン必須ガード（auth系・healthz・staticは除外）。未ログインはログインへ誘導。
-_PUBLIC_ENDPOINTS = {"auth.login", "auth.signup", "static"}
+_PUBLIC_ENDPOINTS = {"auth.login", "auth.signup", "static", "healthz"}
 
 
 @app.before_request
@@ -213,6 +213,15 @@ def inject_data_health():
     except Exception:  # noqa: BLE001 — ヘルス表示の失敗で画面を落とさない
         pass
     return {"data_health": info}
+
+
+@app.route("/healthz")
+def healthz():
+    """キープアライブ・死活監視用（認証不要・DBに軽く触って生存確認）。"""
+    try:
+        return jsonify({"ok": True, "cases": db.count_cases()})
+    except Exception:  # noqa: BLE001 — 監視応答は落とさない
+        return jsonify({"ok": False}), 500
 
 
 @app.route("/")

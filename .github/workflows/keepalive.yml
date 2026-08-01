@@ -1,0 +1,38 @@
+name: キープアライブ（日中のスリープ防止）
+
+# Render 無料プランは15分アクセスが無いとスリープし、次のアクセスで
+# 「SERVICE WAKING UP...」画面が出る。日中は /healthz を叩き続けて防ぐ。
+#
+# 【方式】GitHubのcronは高頻度指定を間引くため、30分おきに発火し
+# 1回の起動で約50分ぶん5分おきにpingする内部ループ＋concurrency直列化で
+# 切れ目なく繋ぐ（川野ツールで実証済みの方式）。
+#
+# 【時間帯の設計・重要】Render無料枠は月750インスタンス時間で、同じワークスペースの
+# 川野ツールが JST 7:00〜23:00 のキープアライブで約480h/月を使用中。
+# 本サービスは JST 9:00〜17:00（約250h/月）に抑え、合算730h≒枠内に収める。
+# 夜間・早朝の最初のアクセスでは起動画面が出る。完全に無くすには有料プラン
+# （Starter $7/月・スリープ無し）へ切り替える。
+on:
+  schedule:
+    - cron: "*/30 0-7 * * *"   # UTC 0:00-7:59 = JST 9:00-16:59
+  workflow_dispatch: {}
+
+concurrency:
+  group: keepalive
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 58
+    steps:
+      - name: 約50分間、5分おきに /healthz を叩いて起動を維持
+        run: |
+          URL="https://njss-dilunova.onrender.com/healthz"
+          END=$(( $(date +%s) + 3000 ))   # 今から約50分後まで
+          while [ "$(date +%s)" -lt "$END" ]; do
+            # スリープからの復帰待ちを見込んで最大90秒
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 90 "$URL" || echo "000")
+            echo "$(date -u +%H:%M:%S)Z ping $URL -> HTTP $CODE"
+            [ "$(date +%s)" -lt "$END" ] && sleep 300 || break
+          done

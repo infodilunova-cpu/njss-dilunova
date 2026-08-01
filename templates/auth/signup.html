@@ -1,15 +1,16 @@
 {% extends "auth/_base.html" %}{% block t %}新規登録{% endblock %}
 {% block body %}<div class="box">
-  <h1>新規登録</h1><p class="sub">最初の登録者は自動的に管理者になります。</p>
+  <h1>新規登録</h1><p class="sub">メールアドレスとパスワードだけで始められます。</p>
   {% with ms=get_flashed_messages(with_categories=true) %}{% for c,m in ms %}<div class="flash {{c}}">{{m}}</div>{% endfor %}{% endwith %}
   <form method="post">
     <label>メールアドレス</label><input type="email" name="email" required autofocus>
     <label>パスワード（6文字以上）</label><input type="password" name="password" required>
-    <label>業種（あなたの取りたい案件）</label>
-    <select name="vertical">
-      {% for vid, vlabel in verticals %}<option value="{{ vid }}">{{ vlabel }}</option>{% endfor %}
-    </select>
+    {# 業種選択は撤去（案件は全業種を統合表示するため。取りたい案件の絞り込みは
+       ログイン後の「マイ条件」で行う） #}
     <button type="submit">登録してはじめる</button>
   </form>
+  {% if supa %}
+  <div class="oauth"><a class="gbtn" href="{{ url_for('auth.google_login') }}">Googleで登録</a></div>
+  {% endif %}
   <p class="alt">既にアカウントがある場合は <a href="{{ url_for('auth.login') }}">ログイン</a></p>
 </div>{% endblock %}
