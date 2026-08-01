@@ -87,11 +87,12 @@ def admin_emails() -> set[str]:
     return {e.strip().lower() for e in raw.split(",") if e.strip()}
 
 
-def create_user(email: str, password: str, ai_enabled: bool = False,
+def create_user(email: str, password: str, ai_enabled: bool = True,
                 is_admin: bool = False, vertical: str = "denki") -> tuple[bool, str]:
     """ユーザー作成。成功で (True, "")、失敗で (False, 理由)。
 
     Supabase(Postgres)が有効ならそこへ永続保存、無効ならローカル users.db。
+    AIモードは既定で許可（使わせない相手は管理者が /admin/users で個別にOFF）。
     ADMIN_EMAILS に載っているメールは常に管理者＋AI許可。
     ADMIN_EMAILS 未設定時のみ、最初の1人を自動的に管理者にする（ローカル開発用）。
     """
@@ -255,7 +256,19 @@ def can_use_ai() -> bool:
     if not auth_required():
         return True
     u = current_user()
-    return bool(u and u.get("ai_enabled"))
+    if not u:
+        return False
+    # Postgres永続ユーザーで不許可に見える場合はDBを見直す（管理者が後から
+    # 許可をONにした直後でも、再ログインなしで反映させるため）。
+    if not u.get("ai_enabled") and u.get("via") == "supa_pg" and _pg():
+        import supa
+        fresh = supa.get_user((u.get("email") or "").strip().lower())
+        if fresh:
+            fresh.pop("password_hash", None)
+            session["pg_user"] = fresh
+            g.user = fresh
+            u = fresh
+    return bool(u.get("ai_enabled"))
 
 
 # ---- デコレータ -------------------------------------------------------------
