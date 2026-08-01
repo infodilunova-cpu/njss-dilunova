@@ -399,6 +399,15 @@
       // マイ条件が白紙で△になったケース: NG行きではなく登録へ誘導する
       html += '<div class="ai-ng"><a class="btn primary" href="/profile">マイ条件（保有資格・等級）を登録する</a>'
         + '<span class="muted small"> 登録すると 〇/✕ で判定できるようになります</span></div>';
+      // △でも止めない: 判断材料が無いだけなので、本人判断でそのまま次へ進める
+      html += '<div class="ai-next"><button type="button" class="btn ghost" id="aiPlanNext">△のまま進む → 入札準備プラン（AI）を作る</button>'
+        + '<span class="muted small"> 参加資格は公告原本で確認しつつ、段取りだけ先に用意します</span></div>';
+    } else if (elig.verdict === '△') {
+      // △（判断材料不足）: NG行きと「このまま進む」の両方を出して本人に選ばせる
+      html += '<div class="ai-ng"><button type="button" class="btn ng-btn" id="aiNgBtn">このままNGリストへ入れる（理由つき）</button>'
+        + '<span class="muted small"> 申請管理のNG列へ移動し、足りなかった点をメモに残します</span></div>';
+      html += '<div class="ai-next"><button type="button" class="btn ghost" id="aiPlanNext">△のまま進む → 入札準備プラン（AI）を作る</button>'
+        + '<span class="muted small"> 参加資格は公告原本で確認しつつ、段取りだけ先に用意します</span></div>';
     } else if (elig.verdict) {
       html += '<div class="ai-ng"><button type="button" class="btn ng-btn" id="aiNgBtn">このままNGリストへ入れる（理由つき）</button>'
         + '<span class="muted small"> 申請管理のNG列へ移動し、足りなかった点をメモに残します</span></div>';
@@ -419,7 +428,7 @@
     out.innerHTML = html;
     var rf = document.getElementById('aiRefresh');
     if (rf) rf.addEventListener('click', function (e) { e.preventDefault(); run(true); });
-    // 判定〇のとき: 隠している入札準備プランを開いてそのまま生成まで進める（動線の続き）
+    // 判定〇/△のとき: 隠している入札準備プランを開いてそのまま生成まで進める（動線の続き）
     var next = document.getElementById('aiPlanNext');
     if (next) next.addEventListener('click', function () {
       var plan = document.querySelector('.plan-box');
