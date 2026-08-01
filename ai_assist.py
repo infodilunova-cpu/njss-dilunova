@@ -245,6 +245,8 @@ def _profile_lines(profile: dict | None) -> str:
             seg = f"{issuer}：{q.get('category') or '工種?'} {q.get('grade') or '等級記載なし'}"
             if q.get("score"):
                 seg += f"({q['score']}点)"
+            if q.get("number"):
+                seg += f" 登録番号:{q['number']}"  # 申請書類の自動入力に使う
             lines.append(seg)
         if lines:
             parts.append(
@@ -436,9 +438,21 @@ def _price_guide_lines(guide: dict | None) -> str:
     return "\n".join(lines) if lines else "（統計を算出できる落札実績が不足）"
 
 
+def _past_awards_lines(past_awards: list | None) -> str:
+    """過去の同名・類似案件の落札実績をプロンプト用テキストにする。"""
+    if not past_awards:
+        return "（同名・類似の過去実績は見つからず）"
+    lines = []
+    for p in past_awards[:6]:
+        kind = "同名(年度違い)" if p.get("kind") == "same" else "類似"
+        lines.append(f"- [{kind}] {p.get('title','')}（公告 {p.get('announced_date') or '?'}）"
+                     f" 落札者: {p.get('winner','?')} 落札額: {p.get('win_price') or '不明'}")
+    return "\n".join(lines)
+
+
 def _build_plan_text(case: dict, profile: dict | None, req: dict | None,
                      price_guide: dict | None, notice_text: str = "",
-                     today: str = "") -> str:
+                     today: str = "", past_awards: list | None = None) -> str:
     """入札準備プラン生成用のユーザープロンプトを組み立てる（純関数・テスト対象）。"""
     today = today or date.today().isoformat()
     desc = (notice_text or case.get("description") or "").strip()
@@ -461,6 +475,9 @@ def _build_plan_text(case: dict, profile: dict | None, req: dict | None,
         f"{_requirements_lines(req)}\n\n"
         "# 落札実績の統計（非AIの確定値。price_hint はこの数字の要約＋注意に限ること）\n"
         f"{_price_guide_lines(price_guide)}\n\n"
+        "# 過去の同名・類似案件の落札実績（毎年出る定例案件なら前回実績が最有力の参考。\n"
+        "#  price_hint で必ず言及すること）\n"
+        f"{_past_awards_lines(past_awards)}\n\n"
         "# 自社（マイ条件。draft はここにある事実のみで書くこと）\n"
         f"{_profile_lines(profile)}\n\n"
         "注意: 上記に書かれている事実のみを根拠にし、書かれていない具体値"
@@ -497,7 +514,8 @@ def _normalize_plan(data: Any) -> dict[str, Any]:
 
 def bid_plan(case: dict, profile: dict | None = None,
              requirements: dict | None = None,
-             price_guide: dict | None = None) -> dict[str, Any]:
+             price_guide: dict | None = None,
+             past_awards: list | None = None) -> dict[str, Any]:
     """案件1件の「入札直前まで」の準備プランをオンデマンド生成して返す。
 
     assist() と同じ流儀: キー未設定なら {"enabled": False}。公告PDFの全文を
@@ -515,12 +533,110 @@ def bid_plan(case: dict, profile: dict | None = None,
             requirements = None
 
     notice_text = _fetch_pdf_text(case.get("detail_url", ""))
-    text = _build_plan_text(case, profile, requirements, price_guide, notice_text)
+    text = _build_plan_text(case, profile, requirements, price_guide, notice_text,
+                            past_awards=past_awards)
     try:
         data = _normalize_plan(
             _call_gemini(text, system=_PLAN_SYSTEM, schema=_PLAN_SCHEMA))
     except ValueError as e:  # JSONDecodeError 含む＝応答が壊れている
         return {"enabled": True, "error": f"AI応答の解析に失敗しました: {e}"[:200]}
+    data["enabled"] = True
+    data["model"] = _model()
+    data["source"] = "pdf_full" if notice_text else "description"
+    return data
+
+
+# ============================================================
+# 提出書類ドラフト（1書類ずつ、機関の様式に沿って作る・オンデマンド）
+# ============================================================
+
+_DOC_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "doc_title": {"type": "string", "description": "作成する書類の正式名称"},
+        "official_format": {
+            "type": "string",
+            "description": "この機関の公式様式についての案内（様式名・番号・入手場所）。"
+                           "公告本文から特定できなければ『公式様式は公告ページの様式集で確認。"
+                           "以下は一般的な様式に沿った下書き』と明示する",
+        },
+        "fields": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string", "description": "記入欄の名前（例: 商号又は名称）"},
+                    "value": {"type": "string",
+                              "description": "マイ条件から自動入力できた値。分からなければ空文字"},
+                    "todo": {"type": "string",
+                             "description": "value が空のとき、ユーザーが何をどこで用意するか1文。"
+                                            "value が入っていれば空文字"},
+                },
+                "required": ["label", "value", "todo"],
+            },
+            "description": "この書類の記入欄を上から順に。自動入力できた欄も含めて全部列挙",
+        },
+        "body": {
+            "type": "string",
+            "description": "そのまま書き写せる書類本文の下書き（宛名・日付欄・記入欄を含む全文）。"
+                           "自動入力できた値は埋め、不明な箇所は【◯◯を記入】の形で明示",
+        },
+        "notes": {"type": "array", "items": {"type": "string"},
+                  "description": "提出前の注意（押印・部数・綴じ方・提出先・期限など公告から分かる範囲）"},
+    },
+    "required": ["doc_title", "official_format", "fields", "body", "notes"],
+}
+
+_DOC_SYSTEM = (
+    "あなたは日本の公共入札の提出書類（参加申請書・入札書・実績調書等）の作成支援の専門家です。"
+    "指定された1つの書類について、公告本文から様式・記載要領を読み取り、その発注機関の"
+    "指定様式にできるだけ沿った『そのまま書き写せる下書き』を作ります。"
+    "【自動入力】マイ条件にある事実（社名・代表者・住所・法人番号・保有資格・機関別の"
+    "入札参加資格の等級や登録番号）は該当欄に必ず埋め込むこと。"
+    "【不足分】マイ条件に無い情報は本文中に【◯◯を記入】と明示し、fields の todo に"
+    "『何をどこで用意するか』を具体的に書くこと（例: 納税証明書その3の3を税務署で取得）。"
+    "【創作禁止】公告本文・マイ条件に無い様式番号・日付・金額・要件を作らないこと。"
+    "様式が特定できない場合はその旨を official_format で正直に伝え、官公庁で一般的な"
+    "様式に沿って作ること。出力は必ず指定のJSONスキーマに従い、日本語で記述すること。"
+)
+
+
+def doc_draft(case: dict, doc_name: str, profile: dict | None = None,
+              requirements: dict | None = None) -> dict[str, Any]:
+    """提出書類1件の下書きをオンデマンド生成して返す（assist と同じ流儀）。"""
+    if not is_enabled():
+        return {"enabled": False}
+    doc_name = (doc_name or "").strip()
+    if not doc_name:
+        return {"enabled": True, "error": "書類名が指定されていません"}
+
+    if requirements is None:
+        try:
+            requirements = procurement.application_requirements(case)
+        except Exception:  # noqa: BLE001 — 土台が無くてもAIは動かす
+            requirements = None
+
+    notice_text = _fetch_pdf_text(case.get("detail_url", ""))
+    desc = (notice_text or case.get("description") or "").strip()
+    src_label = "公告全文（PDFから取得）" if notice_text else "公告本文（抜粋）"
+    text = (
+        f"# 作成する書類（この1つだけ）\n{doc_name}\n\n"
+        "# 案件\n"
+        f"案件名: {case.get('title', '')}\n"
+        f"発注機関: {case.get('agency', '')}（{case.get('agency_type', '')}）\n"
+        f"申込締切: {case.get('deadline', '') or '不明'} / 入札方式: {case.get('bid_method', '') or '不明'}\n\n"
+        f"# {src_label}\n{desc or '（本文なし。様式は一般形で作成し、公告での確認を促すこと）'}\n\n"
+        "# 確定的に算出済みの必要書類の情報\n"
+        f"{_requirements_lines(requirements)}\n\n"
+        "# 自社（マイ条件。ここにある事実は該当欄へ自動入力すること）\n"
+        f"{_profile_lines(profile)}\n"
+    )
+    try:
+        data = _call_gemini(text, system=_DOC_SYSTEM, schema=_DOC_SCHEMA)
+    except ValueError as e:
+        return {"enabled": True, "error": f"AI応答の解析に失敗しました: {e}"[:200]}
+    if not isinstance(data, dict):
+        return {"enabled": True, "error": "AI応答が想定外の形式でした"}
     data["enabled"] = True
     data["model"] = _model()
     data["source"] = "pdf_full" if notice_text else "description"

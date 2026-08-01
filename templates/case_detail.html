@@ -78,6 +78,32 @@
     <div id="aiResult" class="ai-result" hidden></div>
   </section>
 
+  {% if past_awards %}
+  {# 過去の同名・類似案件の落札実績（非AI・確定値）。毎年出る定例案件の
+     「前回いくらで・どこが落札したか」は入札額の最有力の参考情報。 #}
+  <section class="guide-box past-awards">
+    <h2>この案件の過去実績 — 前回はいくらで誰が落札したか</h2>
+    <p class="pg-note muted small">年度違いの同名案件・同一機関の類似案件を落札実績（約2年分）から自動照合しています。</p>
+    <div class="table-scroll">
+    <table class="list">
+      <thead><tr><th>公告日</th><th>案件名</th><th>落札者</th><th>落札額</th><th>照合</th></tr></thead>
+      <tbody>
+      {% for p in past_awards %}
+        <tr>
+          <td class="nowrap">{{ p.announced_date or '—' }}</td>
+          <td><a href="{{ url_for('case_detail', case_id=p.id) }}">{{ p.title }}</a></td>
+          <td>{{ p.winner }}</td>
+          <td class="nowrap">{{ p.win_price or '不明' }}</td>
+          <td class="nowrap">{% if p.kind == 'same' %}<span class="tag same-tag">同名（年度違い）</span>
+              {% else %}<span class="tag">類似</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </section>
+  {% endif %}
+
   {# 動線: まず応募アシストで参加可否を判定し、〇のときだけ「次のステップ」として
      入札準備プランを見せる（最初から両方並べると情報過多になるため）。
      既にプランを生成済み（plan_cached）の場合は隠さない。 #}
@@ -551,9 +577,15 @@
         + '</tbody></table></div>';
     }
     if (d.documents && d.documents.length) {
-      html += '<div class="ai-block"><h3>提出書類チェックリスト</h3><ul class="checklist">'
-        + d.documents.map(function (x) {
-            return '<li><label><input type="checkbox"> ' + esc(x) + '</label></li>';
+      // 各書類: 提出チェック（ユーザー別にサーバ保存）＋「この書類を作る」（AIが様式に沿って下書き）
+      html += '<div class="ai-block"><h3>提出書類チェックリスト</h3>'
+        + '<p class="muted small">「この書類を作る」でAIが様式に沿った下書きを作り、マイ条件の情報（社名・代表者・登録番号など）を自動で埋めます。</p>'
+        + '<ul class="checklist doc-list">'
+        + d.documents.map(function (x, i) {
+            return '<li data-i="' + i + '">'
+              + '<div class="doc-row"><label><input type="checkbox" class="doc-check" data-i="' + i + '"> ' + esc(x) + '</label>'
+              + '<button type="button" class="btn small ghost doc-make" data-i="' + i + '">この書類を作る</button></div>'
+              + '<div class="doc-draft" hidden></div></li>';
           }).join('') + '</ul></div>';
     }
     if (d.draft) {
@@ -590,6 +622,105 @@
     });
     var rf = document.getElementById('planRefresh');
     if (rf) rf.addEventListener('click', function (e) { e.preventDefault(); run(true); });
+    bindDocs(d.documents || []);
+  }
+
+  /* 提出書類: チェック状態のサーバ保存＋「この書類を作る」（AIドラフト生成） */
+  function bindDocs(docs) {
+    if (!docs.length) return;
+    // 保存済みのチェック状態を復元
+    fetch('/case/' + caseId + '/doc-status')
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        var st = (d && d.states) || {};
+        document.querySelectorAll('.doc-check').forEach(function (cb) {
+          var name = docs[parseInt(cb.getAttribute('data-i'), 10)];
+          if (st[name]) cb.checked = true;
+        });
+      }).catch(function () {});
+    // チェック変更を即保存（これ提出した/まだ を端末をまたいで覚える）
+    document.querySelectorAll('.doc-check').forEach(function (cb) {
+      cb.addEventListener('change', function () {
+        var name = docs[parseInt(cb.getAttribute('data-i'), 10)];
+        fetch('/case/' + caseId + '/doc-status', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ doc: name, checked: cb.checked })
+        }).catch(function () {});
+      });
+    });
+    // 「この書類を作る」→ AIが様式に沿った下書きを生成して展開
+    document.querySelectorAll('.doc-make').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var i = parseInt(btn.getAttribute('data-i'), 10);
+        var name = docs[i];
+        var slot = btn.closest('li').querySelector('.doc-draft');
+        if (!slot.hidden && slot.innerHTML) { slot.hidden = true; btn.textContent = 'この書類を作る'; return; }
+        slot.hidden = false;
+        slot.innerHTML = '<div class="ai-loading"><div class="ai-loading-msg">様式を確認して下書きを作成中'
+          + '<span class="ai-dots"><i>.</i><i>.</i><i>.</i></span></div><div class="ai-bar"></div></div>';
+        btn.disabled = true;
+        fetch('/case/' + caseId + '/doc-draft', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ doc: name })
+        }).then(function (r) { return r.json(); })
+          .then(function (d) { renderDoc(slot, d, name); btn.textContent = '閉じる'; })
+          .catch(function () { slot.innerHTML = '<p class="ai-note">通信に失敗しました。再度お試しください。</p>'; })
+          .finally(function () { btn.disabled = false; });
+      });
+    });
+  }
+
+  function renderDoc(slot, d, name) {
+    if (d.enabled === false) {
+      slot.innerHTML = '<p class="ai-note">この機能は<strong>課金プラン</strong>で有効化されます。</p>';
+      return;
+    }
+    if (d.error) {
+      slot.innerHTML = '<p class="ai-note">下書きの生成に失敗しました。<br><span class="muted">' + esc(d.error) + '</span></p>';
+      return;
+    }
+    var html = '';
+    if (d.official_format) {
+      html += '<p class="doc-format"><strong>様式について:</strong> ' + esc(d.official_format) + '</p>';
+    }
+    var fields = d.fields || [];
+    var filled = fields.filter(function (f) { return f.value; });
+    var todos = fields.filter(function (f) { return !f.value; });
+    if (filled.length) {
+      html += '<div class="doc-sec"><h4>自動入力できた項目（マイ条件から）</h4><ul>'
+        + filled.map(function (f) { return '<li>' + esc(f.label) + ': <strong>' + esc(f.value) + '</strong></li>'; }).join('')
+        + '</ul></div>';
+    }
+    if (todos.length) {
+      html += '<div class="doc-sec"><h4>あなたが用意する項目（ToDo）</h4><ul class="checklist">'
+        + todos.map(function (f) {
+            return '<li><label><input type="checkbox"> <strong>' + esc(f.label) + '</strong>'
+              + (f.todo ? ' — ' + esc(f.todo) : '') + '</label></li>';
+          }).join('') + '</ul></div>';
+    }
+    if (d.body) {
+      html += '<div class="doc-sec"><h4>下書き（そのまま書き写せます。【 】は要記入）</h4>'
+        + '<textarea class="doc-body" rows="14" readonly>' + esc(d.body) + '</textarea>'
+        + '<button type="button" class="btn small doc-copy">下書きをコピー</button></div>';
+    }
+    if (d.notes && d.notes.length) {
+      html += '<div class="doc-sec"><h4>提出前の注意</h4>' + ul(d.notes) + '</div>';
+    }
+    html += '<p class="ai-foot muted">AIが公告とマイ条件から作成した下書きです。提出前に必ず公式様式・公告原本と突き合わせてください。</p>';
+    slot.innerHTML = html;
+    var cp = slot.querySelector('.doc-copy');
+    if (cp) cp.addEventListener('click', function () {
+      var text = d.body || '';
+      function done() { cp.textContent = 'コピーしました'; setTimeout(function () { cp.textContent = '下書きをコピー'; }, 1500); }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done);
+      } else {
+        var ta = document.createElement('textarea'); ta.value = text;
+        document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); done(); } catch (e) {}
+        document.body.removeChild(ta);
+      }
+    });
   }
 
   function run(refresh) {

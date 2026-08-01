@@ -577,6 +577,49 @@ def set_ai_assist(external_id: str, payload: str, model: str = "",
         conn.commit()
 
 
+# 提出書類チェック状態のキャッシュキー接頭辞（ai_assist テーブルをユーザー別KVとして利用）
+_DOC_STATE_PREFIX = "docstate:"
+
+
+def get_doc_state(external_id: str, user: str = "") -> dict[str, Any]:
+    """案件ごとの提出書類チェック状態（{書類名: true/false}）を返す。"""
+    import json
+    row = get_ai_assist(_DOC_STATE_PREFIX + external_id, user=user)
+    if not row:
+        return {}
+    try:
+        d = json.loads(row["payload"])
+        return d if isinstance(d, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def set_doc_state(external_id: str, state: dict[str, Any], user: str = "") -> None:
+    """提出書類チェック状態を保存（SQLite＋Supabase KVへwrite-through）。"""
+    import json
+    clean = {str(k)[:120]: bool(v) for k, v in (state or {}).items()}
+    set_ai_assist(_DOC_STATE_PREFIX + external_id,
+                  json.dumps(clean, ensure_ascii=False), user=user)
+    supa.save(f"docstate:{_u(user)}:{external_id}", clean)
+
+
+def _restore_doc_states() -> int:
+    """Supabase KVの提出書類チェック状態を全ユーザー分 SQLite へ復元。"""
+    n = 0
+    for key, state in supa.load_prefix("docstate:").items():
+        parts = key.split(":", 2)  # docstate:<user>:<external_id>
+        if len(parts) != 3 or not isinstance(state, dict):
+            continue
+        _, user, ext = parts
+        if not ext:
+            continue
+        import json
+        set_ai_assist(_DOC_STATE_PREFIX + ext,
+                      json.dumps(state, ensure_ascii=False), user=user)
+        n += 1
+    return n
+
+
 def get_case_id_by_external(external_id: str) -> int | None:
     """external_id（取得元の安定ID）から現在の案件id を引く。
 
@@ -1094,6 +1137,7 @@ def restore_from_supa() -> dict[str, int]:
             if isinstance(exc, list) and exc:
                 replace_agency_exclusions(exc, user=user)
                 counts["exclusions"] += len(exc)
+        counts["doc_states"] = _restore_doc_states()
     except Exception as e:  # noqa: BLE001 — 復元失敗でアプリを落とさない
         import logging
         logging.getLogger(__name__).warning("supa restore failed: %s", e)
@@ -1317,6 +1361,90 @@ def list_competitors(q: str = "", prefecture: str = "",
         nq = normalize_company(q)
         rows = [r for r in rows if nq in normalize_company(r["winner"])]
     return rows
+
+
+# ============================================================
+# 過去の同名・類似案件の落札実績（毎年出る案件の「前回いくら・どこが取ったか」）
+# ============================================================
+
+# 年度・回次の表記（これを取り除くと「毎年ほぼ同じ名前で出る案件」が同一キーになる）
+_YEAR_TOKEN_RE = re.compile(
+    r"令和\s*元?\s*\d*\s*年度?|平成\s*\d+\s*年度?|20\d{2}\s*年度?"
+    r"|[rh]\s*\d{1,2}\s*年?度?|第\s*\d+\s*[回号次]")
+
+
+def _year_stripped_key(title: str, agency: str) -> str:
+    """年度・回次を取り除いた同一性キー（normalize_dedupe_key の年度非依存版）。
+
+    例: 「令和８年度 一般定期健康診断業務」と「令和7年度一般定期健康診断業務」→ 同一。
+    """
+    def _n(s: str) -> str:
+        s = unicodedata.normalize("NFKC", s or "").lower()
+        s = re.sub(r"\s+", "", s)
+        s = _YEAR_TOKEN_RE.sub("", s)
+        return s
+    return f"{_n(title)}|{_n(agency)}"
+
+
+@lru_cache(maxsize=1)
+def _awards_by_year_key() -> dict[str, list[int]]:
+    """落札者が判明している全案件を、年度非依存キーで索引化（プロセス内キャッシュ）。
+
+    DBは毎日のデプロイで丸ごと入れ替わる＝プロセス生存中は不変なので1回だけ構築。
+    """
+    idx: dict[str, list[int]] = {}
+    with _connect() as conn:
+        for r in conn.execute(
+                "SELECT id, title, agency FROM cases WHERE winner != ''").fetchall():
+            idx.setdefault(_year_stripped_key(r["title"], r["agency"]), []).append(r["id"])
+    return idx
+
+
+def similar_past_awards(case: dict[str, Any], limit: int = 8) -> list[dict[str, Any]]:
+    """この案件と「同名（年度違い）」または「類似」の過去落札実績を返す。
+
+    毎年ほぼ同じ名前で出る定例案件の「前回の落札者・落札額」は入札額の最有力の
+    参考情報になる（調達ポータル落札実績 約2年分＋落札者つき公告が母集団）。
+      1) 年度・回次を除いたタイトル＋機関が完全一致 → kind='same'（同名案件）
+      2) 同一機関で文字列類似度が高いもの          → kind='similar'（類似案件）
+    """
+    import difflib
+    title = case.get("title") or ""
+    agency = case.get("agency") or ""
+    if not title:
+        return []
+    key = _year_stripped_key(title, agency)
+    idx = _awards_by_year_key()
+    self_id = case.get("id")
+    ids = [i for i in idx.get(key, []) if i != self_id]
+
+    out: list[dict[str, Any]] = []
+    with _connect() as conn:
+        if ids:
+            ph = ",".join("?" * len(ids))
+            out = [dict(r) | {"kind": "same"} for r in conn.execute(
+                f"SELECT id, title, agency, announced_date, deadline, winner, win_price, "
+                f"budget, budget_yen FROM cases WHERE id IN ({ph}) "
+                f"ORDER BY announced_date DESC", ids).fetchall()]
+        if len(out) < limit and agency:
+            # 同一機関の落札済み案件から、タイトル類似度で補完（同名一致分は除く）
+            seen = {r["id"] for r in out} | {self_id}
+            target = _year_stripped_key(title, "").split("|")[0]
+            cands = conn.execute(
+                "SELECT id, title, agency, announced_date, deadline, winner, win_price, "
+                "budget, budget_yen FROM cases WHERE agency = ? AND winner != '' "
+                "ORDER BY announced_date DESC LIMIT 800", (agency,)).fetchall()
+            scored = []
+            for r in cands:
+                if r["id"] in seen:
+                    continue
+                cand_t = _year_stripped_key(r["title"], "").split("|")[0]
+                ratio = difflib.SequenceMatcher(None, target, cand_t).ratio()
+                if ratio >= 0.8:
+                    scored.append((ratio, dict(r) | {"kind": "similar"}))
+            scored.sort(key=lambda x: (-x[0], x[1].get("announced_date") or ""))
+            out += [r for _, r in scored]
+    return out[:limit]
 
 
 def competitor_cases(winner: str) -> list[dict[str, Any]]:

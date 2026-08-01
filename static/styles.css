@@ -664,6 +664,23 @@ tr.row-check td { background: #fffaf0; }
 /* 判定〇→入札準備プランへ進む「次のステップ」ボタン行 */
 .ai-next { margin-top: 8px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 
+/* 過去の同名・類似案件の落札実績 */
+.past-awards .table-scroll { overflow-x: auto; }
+.tag.same-tag { background: #16a34a; color: #fff; }
+
+/* 提出書類の作成UI（チェックリスト＋AIドラフト） */
+.doc-list li { margin-bottom: 6px; }
+.doc-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.doc-draft { margin: 8px 0 4px 22px; padding: 10px 12px; border: 1px solid var(--border);
+  border-radius: 8px; background: #fff; }
+.doc-sec { margin-top: 8px; }
+.doc-sec h4 { margin: 0 0 4px; font-size: 12.5px; }
+.doc-body { width: 100%; font-size: 12.5px; line-height: 1.6; padding: 8px;
+  border: 1px solid var(--border); border-radius: 6px; box-sizing: border-box;
+  font-family: inherit; }
+.doc-format { font-size: 12.5px; background: #fffbeb; border: 1px solid #fde68a;
+  padding: 6px 8px; border-radius: 6px; }
+
 /* 設定画面（アカウント・パスワード変更・ログアウト） */
 .btn.danger { background: #dc2626; color: #fff; border-color: #dc2626; }
 .btn.danger:hover { background: #b91c1c; border-color: #b91c1c; }

@@ -393,6 +393,8 @@ def case_detail(case_id: int):
     return render_template(
         "case_detail.html",
         c=case,
+        # 過去の同名・類似案件の落札実績（毎年出る案件の前回額・落札者。非AI）
+        past_awards=db.similar_past_awards(case),
         today=date.today().isoformat(),
         spec_reasons=db.SPEC_REASONS,
         application=application,
@@ -461,6 +463,75 @@ def case_ai_assist(case_id: int):
 # 入札準備プランのキャッシュキー接頭辞。AI応募アシストと同じ ai_assist テーブルに
 # 同居させつつ、判定結果（素の external_id）とは別枠で保持する。
 _PLAN_CACHE_PREFIX = "plan:"
+# 提出書類ドラフトのキャッシュキー接頭辞（書類名を含めて書類ごとに別キャッシュ）。
+_DOC_CACHE_PREFIX = "doc:"
+
+
+@app.route("/case/<int:case_id>/doc-draft", methods=["POST"])
+def case_doc_draft(case_id: int):
+    """【課金プラン・オンデマンド】提出書類1件の下書きを様式に沿って生成して返す。
+
+    マイ条件にある情報（社名・代表者・住所・法人番号・資格/登録番号）は自動入力し、
+    足りない欄は【◯◯を記入】＋ToDoで示す。キャッシュはユーザー×案件×書類名。
+    """
+    import json
+    if not auth.can_use_ai():
+        return jsonify({"enabled": False,
+                        "reason": "このアカウントではAIモードが有効化されていません。"})
+    case = db.get_case(case_id)
+    if not case:
+        abort(404)
+    doc = str((request.get_json(silent=True) or {}).get("doc", "")).strip()[:120]
+    if not doc:
+        return jsonify({"enabled": True, "error": "書類名が指定されていません"}), 400
+    ext = case.get("external_id", "")
+    refresh = request.args.get("refresh") == "1"
+    key = _DOC_CACHE_PREFIX + doc + ":" + ext
+
+    if not refresh and ext:
+        cached = db.get_ai_assist(key, user=auth.current_email())
+        if cached:
+            data = json.loads(cached["payload"])
+            data["cached"] = True
+            return jsonify(data)
+
+    if not ai_assist.is_enabled():
+        return jsonify({"enabled": False})
+
+    try:
+        requirements = procurement.application_requirements(case)
+        result = ai_assist.doc_draft(case, doc,
+                                     db.get_profile(user=auth.current_email()),
+                                     requirements)
+    except Exception as e:  # noqa: BLE001 — AI失敗で500にせず画面で案内
+        logging.getLogger(__name__).warning("doc draft failed", exc_info=True)
+        return jsonify({"enabled": True, "error": str(e)[:200]}), 200
+
+    if result.get("enabled") and not result.get("error") and ext:
+        db.set_ai_assist(key, json.dumps(result, ensure_ascii=False),
+                         result.get("model", ""), user=auth.current_email())
+    result["cached"] = False
+    return jsonify(result)
+
+
+@app.route("/case/<int:case_id>/doc-status", methods=["GET", "POST"])
+def case_doc_status(case_id: int):
+    """提出書類のチェック状態（これ提出した/まだ）のユーザー別 取得・保存。"""
+    case = db.get_case(case_id)
+    if not case:
+        abort(404)
+    ext = case.get("external_id", "")
+    u = auth.current_email()
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        doc = str(body.get("doc", "")).strip()[:120]
+        if not doc:
+            return jsonify({"ok": False}), 400
+        state = db.get_doc_state(ext, user=u)
+        state[doc] = bool(body.get("checked"))
+        db.set_doc_state(ext, state, user=u)
+        return jsonify({"ok": True, "states": state})
+    return jsonify({"ok": True, "states": db.get_doc_state(ext, user=u)})
 
 
 @app.route("/case/<int:case_id>/bid-plan", methods=["POST"])
@@ -497,7 +568,8 @@ def case_bid_plan(case_id: int):
 
     try:
         requirements = procurement.application_requirements(case)
-        result = ai_assist.bid_plan(case, db.get_profile(user=auth.current_email()), requirements, guide)
+        result = ai_assist.bid_plan(case, db.get_profile(user=auth.current_email()), requirements, guide,
+                                    past_awards=db.similar_past_awards(case))
     except Exception as e:  # noqa: BLE001 — AI失敗で500にせず画面で案内
         logging.getLogger(__name__).warning("bid plan failed", exc_info=True)
         return jsonify({"enabled": True, "error": str(e)[:200]}), 200
