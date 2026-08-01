@@ -167,11 +167,22 @@ def inject_vertical():
 
 
 @app.context_processor
+def inject_persist_on():
+    """Supabase永続化が有効か。有効時はブラウザlocalStorageの自動復元を止める
+    （ユーザー別のサーバ保存が真の保存先になるため。共有PCでの他人データ混入も防ぐ）。"""
+    try:
+        import supa
+        return {"persist_on": supa.enabled()}
+    except Exception:  # noqa: BLE001
+        return {"persist_on": False}
+
+
+@app.context_processor
 def inject_profile_set():
     """無料ホストはディスク揮発のためマイ条件が消える。ブラウザ保存→自動復元の判定用に、
     サーバにマイ条件があるかを全テンプレへ渡す。"""
     try:
-        return {"profile_set": bool(db.get_profile().get("prefectures"))}
+        return {"profile_set": bool(db.get_profile(user=auth.current_email()).get("prefectures"))}
     except Exception:  # noqa: BLE001
         return {"profile_set": False}
 
@@ -217,9 +228,14 @@ def inject_data_health():
 
 @app.route("/healthz")
 def healthz():
-    """キープアライブ・死活監視用（認証不要・DBに軽く触って生存確認）。"""
+    """キープアライブ・死活監視用（認証不要・DBに軽く触って生存確認）。
+
+    persist は Supabase永続化の状態（on=有効 / off=未設定）。設定直後の疎通確認に使う。
+    """
     try:
-        return jsonify({"ok": True, "cases": db.count_cases()})
+        import supa
+        return jsonify({"ok": True, "cases": db.count_cases(),
+                        "persist": "on" if supa.enabled() else "off"})
     except Exception:  # noqa: BLE001 — 監視応答は落とさない
         return jsonify({"ok": False}), 500
 
@@ -281,7 +297,7 @@ def cases():
         q=q,
         announced_after=announced_after,
         # 監視機関でチェックを外した発注機関の案件は最初から除外する
-        exclude_agencies=db.list_agency_exclusions(),
+        exclude_agencies=db.list_agency_exclusions(user=auth.current_email()),
         # 業種で分けず全件を統合表示（電気＋Web＋…を1つの盤面で横断検索）
         vertical=None,
     )
@@ -370,7 +386,7 @@ def case_detail(case_id: int):
     guide = procurement.application_guide(case, agency_info)
     # 必要書類・ToDo・応募内容を案件属性から確定的に導出（実行時AIなし）。
     requirements = procurement.application_requirements(case, guide)
-    application = db.get_application(case_id)
+    application = db.get_application(case_id, user=auth.current_email())
     if application:
         application.setdefault("deadline", case.get("deadline", ""))
         application = _enrich_application(application)
@@ -387,9 +403,9 @@ def case_detail(case_id: int):
         guide=guide,
         requirements=requirements,
         ai_enabled=auth.can_use_ai(),
-        ai_cached=bool(db.get_ai_assist(case.get("external_id", ""))),
+        ai_cached=bool(db.get_ai_assist(case.get("external_id", ""), user=auth.current_email())),
         plan_cached=bool(db.get_ai_assist(
-            _PLAN_CACHE_PREFIX + case.get("external_id", ""))),
+            _PLAN_CACHE_PREFIX + case.get("external_id", ""), user=auth.current_email())),
         # 入札額ガイド（落札実績の統計・非AI）。AIの結果と並記するためサーバ側でも渡す。
         price_guide=db.price_guide(case.get("category", ""), case.get("agency", "")),
     )
@@ -414,14 +430,14 @@ def case_ai_assist(case_id: int):
     refresh = request.args.get("refresh") == "1"
 
     if not refresh:
-        cached = db.get_ai_assist(ext)
+        cached = db.get_ai_assist(ext, user=auth.current_email())
         if cached:
             data = json.loads(cached["payload"])
             # 旧世代のキャッシュにも現行の判定ポリシーを適用して返す
             # （登録情報が無いのに〇/✕断定していた過去の結果を△に補正）。
             data["eligibility"] = ai_assist.apply_verdict_policy(
                 data.get("eligibility"),
-                ai_assist.profile_registered(db.get_profile()))
+                ai_assist.profile_registered(db.get_profile(user=auth.current_email())))
             data["cached"] = True
             return jsonify(data)
 
@@ -430,14 +446,14 @@ def case_ai_assist(case_id: int):
 
     try:
         requirements = procurement.application_requirements(case)
-        result = ai_assist.assist(case, db.get_profile(), requirements)
+        result = ai_assist.assist(case, db.get_profile(user=auth.current_email()), requirements)
     except Exception as e:  # noqa: BLE001 — AI失敗で500にせず画面で案内
         logging.getLogger(__name__).warning("ai assist failed", exc_info=True)
         return jsonify({"enabled": True, "error": str(e)[:200]}), 200
 
     if result.get("enabled") and ext:
         db.set_ai_assist(ext, json.dumps(result, ensure_ascii=False),
-                         result.get("model", ""))
+                         result.get("model", ""), user=auth.current_email())
     result["cached"] = False
     return jsonify(result)
 
@@ -468,7 +484,7 @@ def case_bid_plan(case_id: int):
     guide = db.price_guide(case.get("category", ""), case.get("agency", ""))
 
     if not refresh and ext:
-        cached = db.get_ai_assist(_PLAN_CACHE_PREFIX + ext)
+        cached = db.get_ai_assist(_PLAN_CACHE_PREFIX + ext, user=auth.current_email())
         if cached:
             data = json.loads(cached["payload"])
             data["cached"] = True
@@ -481,7 +497,7 @@ def case_bid_plan(case_id: int):
 
     try:
         requirements = procurement.application_requirements(case)
-        result = ai_assist.bid_plan(case, db.get_profile(), requirements, guide)
+        result = ai_assist.bid_plan(case, db.get_profile(user=auth.current_email()), requirements, guide)
     except Exception as e:  # noqa: BLE001 — AI失敗で500にせず画面で案内
         logging.getLogger(__name__).warning("bid plan failed", exc_info=True)
         return jsonify({"enabled": True, "error": str(e)[:200]}), 200
@@ -490,7 +506,7 @@ def case_bid_plan(case_id: int):
     if result.get("enabled") and not result.get("error") and ext:
         db.set_ai_assist(_PLAN_CACHE_PREFIX + ext,
                          json.dumps(result, ensure_ascii=False),
-                         result.get("model", ""))
+                         result.get("model", ""), user=auth.current_email())
     result["cached"] = False
     result["price_guide"] = guide
     result["budget_yen"] = case.get("budget_yen") or 0
@@ -509,7 +525,7 @@ def apply_case(case_id: int):
     # 既存値を起点に、フォームが「管理する」と宣言した項目だけ上書きする。
     # これでカンバンのモーダル（全項目）と案件詳細フォーム（一部）が同じ保存先を
     # 壊さず共有できる（未指定項目は消えない）。managed 未指定なら従来どおり全更新。
-    cur = db.get_application(case_id) or {}
+    cur = db.get_application(case_id, user=auth.current_email()) or {}
     managed_raw = f.get("managed")
     managed = set(s for s in (managed_raw or "").split(",") if s) if managed_raw else None
 
@@ -554,7 +570,7 @@ def apply_case(case_id: int):
     }
     is_ajax = bool(f.get("ajax") or request.headers.get("X-Requested-With") == "fetch")
     try:
-        db.set_application(case_id, status, **fields)
+        db.set_application(case_id, status, user=auth.current_email(), **fields)
     except ValueError:
         # 不正ステータスは「保存できなかった」ことを必ず伝える（AJAXでも握りつぶさない）。
         if is_ajax:
@@ -570,7 +586,7 @@ def apply_case(case_id: int):
 @app.route("/applications/<int:case_id>/delete", methods=["POST"])
 def application_delete(case_id: int):
     """案件を申請管理から削除（カンバンから外す）。案件自体は残る。"""
-    db.delete_application(case_id)
+    db.delete_application(case_id, user=auth.current_email())
     if request.headers.get("X-Requested-With") == "fetch" or request.is_json:
         return ("", 204)
     flash("申請管理から削除しました。", "ok")
@@ -616,7 +632,7 @@ def applications_restore():
             partners=it.get("partners") or [],
         )
         # localStorage を真の保存先として上書き復元する（揮発DB対策）。
-        db.set_application(case_id, status, **fields)
+        db.set_application(case_id, status, user=auth.current_email(), **fields)
         restored += 1
     return jsonify({"restored": restored})
 
@@ -629,7 +645,7 @@ def applications():
     案件は applications テーブル（=管理に登録された案件）が母集団。
     """
     brand = verticals.get(current_vertical())
-    rows = [_enrich_application(r) for r in db.list_applications(None)]
+    rows = [_enrich_application(r) for r in db.list_applications(None, user=auth.current_email())]
     config = {
         "statuses": [{"id": s, "accent": db.STATUS_ACCENT.get(s, "#94a3b8")}
                      for s in db.APP_STATUSES],
@@ -638,13 +654,13 @@ def applications():
         "works": brand.get("work_color", db.WORK_COLOR),
         "submit_methods": db.SUBMIT_METHODS,
         "today": date.today().isoformat(),
-        "company_name": db.get_profile().get("company", "") or brand["label"],
+        "company_name": db.get_profile(user=auth.current_email()).get("company", "") or brand["label"],
     }
     return render_template(
         "applications.html",
         cases=rows,
         config=config,
-        companies=db.list_companies(),
+        companies=db.list_companies(user=auth.current_email()),
     )
 
 
@@ -654,14 +670,14 @@ def company_save():
     data = request.get_json(silent=True) or {}
     if not str(data.get("name", "")).strip():
         return jsonify({"error": "会社名は必須です"}), 400
-    cid = db.upsert_company(data)
-    return jsonify({"id": cid, "companies": db.list_companies()})
+    cid = db.upsert_company(data, user=auth.current_email())
+    return jsonify({"id": cid, "companies": db.list_companies(user=auth.current_email())})
 
 
 @app.route("/companies/<int:company_id>/delete", methods=["POST"])
 def company_delete(company_id: int):
-    db.delete_company(company_id)
-    return jsonify({"companies": db.list_companies()})
+    db.delete_company(company_id, user=auth.current_email())
+    return jsonify({"companies": db.list_companies(user=auth.current_email())})
 
 
 @app.route("/companies/restore", methods=["POST"])
@@ -678,9 +694,9 @@ def companies_restore():
     for it in items:
         if str(it.get("name", "")).strip():
             it.pop("id", None)  # サーバ側で採番し直す
-            db.upsert_company(it)
+            db.upsert_company(it, user=auth.current_email())
             n += 1
-    return jsonify({"restored": n, "companies": db.list_companies()})
+    return jsonify({"restored": n, "companies": db.list_companies(user=auth.current_email())})
 
 
 @app.route("/profile", methods=["GET", "POST"])
@@ -711,14 +727,15 @@ def profile():
                         representative=request.form.get("representative", "").strip(),
                         address=request.form.get("address", "").strip(),
                         corp_number=request.form.get("corp_number", "").strip(),
-                        qualifications=qualifications)
+                        qualifications=qualifications,
+                        user=auth.current_email())
         flash("マイ条件を保存しました。マッチ案件・AI判定の等級照合に反映されます。", "ok")
         # 等級を編集して保存した時は、そのままマイ条件に留まる（連続編集しやすく）
         if request.form.get("stay"):
             return redirect(url_for("profile"))
         return redirect(url_for("matches"))
 
-    prof = db.get_profile()
+    prof = db.get_profile(user=auth.current_email())
     return render_template(
         "profile.html",
         prof=prof,
@@ -736,7 +753,7 @@ def profile():
 @app.route("/matches")
 def matches():
     """マイ条件に合致する案件を、マッチ理由つきで表示。"""
-    prof = db.get_profile()
+    prof = db.get_profile(user=auth.current_email())
     rows = db.match_cases(prof)
     return render_template(
         "matches.html",
@@ -756,7 +773,7 @@ def competitors():
     “このシステムを使う会社（自社）の競合になりうる企業”だけを表示する。
     全国を見たい場合は ?all=1。
     """
-    prof = db.get_profile()
+    prof = db.get_profile(user=auth.current_email())
     q = request.args.get("q", "").strip()
     prefecture = request.args.get("prefecture", "").strip()
     show_all = request.args.get("all") == "1"
@@ -811,7 +828,7 @@ def agencies():
     import agency_import
     q = request.args.get("q", "").strip()
     rows = db.list_agencies(q=q)
-    excluded = db.list_agency_exclusions()
+    excluded = db.list_agency_exclusions(user=auth.current_email())
     for r in rows:
         r["platform"] = agency_import.platform_of(r.get("domain", ""))
         r["included"] = r["name"] not in excluded  # チェック状態（既定ON）
@@ -828,9 +845,9 @@ def agency_toggle():
     included = bool(data.get("included"))
     if not name:
         return jsonify({"error": "name required"}), 400
-    db.set_agency_excluded(name, excluded=not included)  # 含めない＝除外
+    db.set_agency_excluded(name, excluded=not included, user=auth.current_email())  # 含めない＝除外
     return jsonify({"name": name, "included": included,
-                    "excluded": sorted(db.list_agency_exclusions())})
+                    "excluded": sorted(db.list_agency_exclusions(user=auth.current_email()))})
 
 
 @app.route("/agencies/exclusions/restore", methods=["POST"])
@@ -838,7 +855,7 @@ def agency_exclusions_restore():
     """localStorage に退避した除外リストをサーバへ復元（揮発DB対策）。"""
     data = request.get_json(silent=True) or {}
     names = data.get("excluded") or []
-    db.replace_agency_exclusions(names)
+    db.replace_agency_exclusions(names, user=auth.current_email())
     return jsonify({"restored": len(names)})
 
 

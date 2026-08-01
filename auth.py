@@ -68,23 +68,56 @@ def init_auth_db() -> None:
 
 # ---- ユーザー操作 -----------------------------------------------------------
 
+def _pg() -> bool:
+    """Supabase Postgres のユーザー永続化が有効か（SUPABASE_DB_URL 設定時）。"""
+    try:
+        import supa
+        return supa.enabled()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def admin_emails() -> set[str]:
+    """管理者として固定するメールアドレス（環境変数 ADMIN_EMAILS・カンマ区切り）。
+
+    これが設定されていれば「最初の登録者を自動管理者にする」挙動は無効化する
+    （毎日DBが消える環境で管理者が日替わりになる事故の防止）。
+    """
+    raw = os.environ.get("ADMIN_EMAILS", "")
+    return {e.strip().lower() for e in raw.split(",") if e.strip()}
+
+
 def create_user(email: str, password: str, ai_enabled: bool = False,
                 is_admin: bool = False, vertical: str = "denki") -> tuple[bool, str]:
     """ユーザー作成。成功で (True, "")、失敗で (False, 理由)。
 
-    vertical でそのアカウントの業種（行き先）を決める。
-    最初の1人は自動的に管理者＆AI許可にする（運用開始をスムーズに）。
+    Supabase(Postgres)が有効ならそこへ永続保存、無効ならローカル users.db。
+    ADMIN_EMAILS に載っているメールは常に管理者＋AI許可。
+    ADMIN_EMAILS 未設定時のみ、最初の1人を自動的に管理者にする（ローカル開発用）。
     """
     email = (email or "").strip().lower()
     if not email or "@" not in email:
         return False, "メールアドレスが不正です。"
     if len(password or "") < 6:
         return False, "パスワードは6文字以上にしてください。"
+
+    admins = admin_emails()
+    if email in admins:
+        ai_enabled, is_admin = True, True
+
+    if _pg():
+        import supa
+        if not admins and supa.count_users() == 0:
+            ai_enabled, is_admin = True, True
+        return supa.create_user(email, generate_password_hash(password),
+                                ai_enabled=ai_enabled, is_admin=is_admin,
+                                vertical=(vertical or "denki").strip())
+
     init_auth_db()
     with _conn() as c:
         first = c.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
-        if first:
-            ai_enabled, is_admin = True, True  # 最初の登録者は管理者
+        if first and not admins:
+            ai_enabled, is_admin = True, True  # ローカル開発時のみの救済
         try:
             c.execute(
                 "INSERT INTO users (email, password_hash, ai_enabled, is_admin, vertical) "
@@ -107,12 +140,17 @@ def set_vertical(email: str, vertical: str) -> bool:
 
 
 def set_password(email: str, password: str) -> tuple[bool, str]:
-    """ローカル認証(users.db)ユーザーのパスワードを更新する。"""
+    """ユーザーのパスワードを更新する（Postgres優先・無効ならローカルusers.db）。"""
     if len(password or "") < 6:
         return False, "パスワードは6文字以上にしてください"
+    email = (email or "").strip().lower()
+    if _pg():
+        import supa
+        ok = supa.set_password(email, generate_password_hash(password))
+        return ok, ("" if ok else "ユーザーが見つかりません")
     with _conn() as c:
         n = c.execute("UPDATE users SET password_hash = ? WHERE email = ?",
-                      (generate_password_hash(password), email.strip().lower())).rowcount
+                      (generate_password_hash(password), email)).rowcount
         c.commit()
     return (n > 0), ("" if n > 0 else "ユーザーが見つかりません")
 
@@ -120,6 +158,17 @@ def set_password(email: str, password: str) -> tuple[bool, str]:
 def verify(email: str, password: str) -> dict[str, Any] | None:
     """メール＋パスワードを検証し、合致すればユーザー dict を返す。"""
     email = (email or "").strip().lower()
+    if _pg():
+        import supa
+        u = supa.get_user(email)
+        if u and check_password_hash(u.get("password_hash", ""), password or ""):
+            u.pop("password_hash", None)
+            # ADMIN_EMAILS のメールはDBの値に関わらず管理者として扱う
+            if email in admin_emails():
+                u["is_admin"] = True
+                u["ai_enabled"] = True
+            return u
+        return None
     with _conn() as c:
         row = c.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
     if row and check_password_hash(row["password_hash"], password or ""):
@@ -153,8 +202,9 @@ def set_ai_enabled(email: str, enabled: bool) -> bool:
 def current_user() -> dict[str, Any] | None:
     """ログイン中ユーザー（未ログインなら None）。リクエスト内でキャッシュ。
 
-    Supabase認証が有効なときは session['sb_user']（メール/業種等）を優先。
-    それ以外は従来の自作認証(users.db の uid)。
+    優先順: ① Supabase Auth(GoTrue) の session['sb_user']
+            ② Supabase Postgres 永続ユーザーの session['pg_user']
+            ③ 従来の自作認証(users.db の uid)
     """
     if "user" in g:
         return g.user
@@ -162,9 +212,22 @@ def current_user() -> dict[str, Any] | None:
     if sb:
         g.user = sb
         return g.user
+    pg = session.get("pg_user")
+    if pg:
+        g.user = pg
+        return g.user
     uid = session.get("uid")
     g.user = get_user(uid) if uid else None
     return g.user
+
+
+def current_email() -> str:
+    """ログイン中ユーザーのメール（小文字）。未ログインは ''。
+
+    マイ条件・申請管理などユーザー別データの分離キーとして使う。
+    """
+    u = current_user()
+    return ((u or {}).get("email") or "").strip().lower()
 
 
 def auth_required() -> bool:
@@ -259,7 +322,11 @@ def login():
         else:
             u = verify(email, pw)
             if u:
-                session["uid"] = u["id"]
+                # Postgres永続ユーザーは dict をセッションへ、ローカルは uid
+                if u.get("via") == "supa_pg":
+                    session["pg_user"] = u
+                else:
+                    session["uid"] = u["id"]
                 return redirect(request.args.get("next") or "/")
             flash("メールアドレスまたはパスワードが違います。", "error")
     return render_template("auth/login.html", supa=_supa())
@@ -289,7 +356,10 @@ def signup():
         ok, msg = create_user(email, pw, vertical=vt)
         if ok:
             u = verify(email, pw)
-            session["uid"] = u["id"]
+            if u and u.get("via") == "supa_pg":
+                session["pg_user"] = u
+            elif u:
+                session["uid"] = u["id"]
             return redirect("/")
         flash(msg, "error")
     return render_template("auth/signup.html", verticals=vlist, supa=_supa())
@@ -342,6 +412,7 @@ def oauth_token():
 @auth_bp.get("/logout")
 def logout():
     session.pop("uid", None)
+    session.pop("pg_user", None)
     session.pop("sb_token", None)
     session.pop("sb_user", None)
     g.pop("user", None)
@@ -403,9 +474,16 @@ def admin_users():
     if request.method == "POST":
         email = request.form.get("email", "")
         enabled = request.form.get("ai_enabled") == "on"
-        set_ai_enabled(email, enabled)
+        if _pg():
+            import supa
+            supa.set_ai_enabled((email or "").strip().lower(), enabled)
+        else:
+            set_ai_enabled(email, enabled)
         flash(f"{email} のAIモードを{'許可' if enabled else '取消'}しました。", "ok")
         return redirect(url_for("auth.admin_users"))
+    if _pg():
+        import supa
+        return render_template("auth/admin_users.html", users=supa.list_users())
     return render_template("auth/admin_users.html", users=list_users())
 
 

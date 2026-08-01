@@ -1,20 +1,20 @@
-"""Supabase(Postgres) 永続化レイヤ — 入力データだけをデプロイ揮発から守る。
+"""Supabase(Postgres) 永続化レイヤ — ユーザー入力データとアカウントを揮発から守る。
 
-Render無料プランはディスクが揮発し、デプロイのたびに SQLite(denki_bid.db) が作り直される。
-案件(cases)は再取得で復元できるが、ユーザーが入れた
+Render無料プランはディスクが揮発し、デプロイのたびに SQLite(denki_bid.db / users.db) が
+作り直される。案件(cases)は再取得で復元できるが、
 
-  - 申請管理(applications) … external_id をキーに保持（案件IDの振り直しに強い）
-  - 協力会社(companies)
-  - マイ条件(profile)
-  - 監視機関の除外(agency_exclusions)
+  - アカウント(メール/パスワード)                 … dln_users テーブル
+  - 申請管理(applications) / 協力会社(companies)
+    マイ条件(profile) / 監視機関の除外(exclusions) … dln_kv テーブル（ユーザー別キー）
 
-は消えると困る。これらを Supabase の単一KVテーブル `kawano_kv`(key, data JSONB) に
-「丸ごとJSONで」保存する。データは小さいので毎回まるごと書いても十分。
+は消えると困るため Supabase Postgres に保存する。
+※テーブル名は dln_* 。同じSupabaseプロジェクトを使う川野ツール(kawano_kv)とは
+  完全に別テーブルで、データは一切混ざらない（DiluNovaは独立プロダクト）。
 
 方針:
   - 接続情報は環境変数 SUPABASE_DB_URL（Renderに設定）。未設定ならこの層は無効＝SQLiteのみ。
-  - すべての関数は失敗しても例外を投げない（Supabase不通でもアプリは動き続ける＝安全網）。
-  - 起動時に load_all() で SQLite へ流し込み、各保存時に save() で書き戻す（write-through）。
+  - KVの関数は失敗しても例外を投げない（Supabase不通でもアプリは動き続ける＝安全網）。
+  - アカウント系(get_user/create_user等)は呼び出し側が有効時のみ使う。
 """
 
 from __future__ import annotations
@@ -26,6 +26,9 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 _TIMEOUT = 5  # 保存時に長くブロックしないよう短め（不通でもSQLite＋localStorageで担保）
+
+_KV_TABLE = "dln_kv"
+_USERS_TABLE = "dln_users"
 
 
 def _url() -> str:
@@ -42,22 +45,35 @@ def _connect():
 
 
 def init() -> None:
-    """KVテーブルを用意（無ければ作成）。失敗しても黙って続行。"""
+    """KV・ユーザーテーブルを用意（無ければ作成）。失敗しても黙って続行。"""
     if not enabled():
         return
     try:
         with _connect() as conn, conn.cursor() as cur:
             cur.execute(
-                "CREATE TABLE IF NOT EXISTS kawano_kv ("
+                f"CREATE TABLE IF NOT EXISTS {_KV_TABLE} ("
                 " key TEXT PRIMARY KEY,"
                 " data JSONB NOT NULL,"
                 " updated_at TIMESTAMPTZ DEFAULT now())"
+            )
+            cur.execute(
+                f"CREATE TABLE IF NOT EXISTS {_USERS_TABLE} ("
+                " email TEXT PRIMARY KEY,"
+                " password_hash TEXT NOT NULL,"
+                " ai_enabled INTEGER DEFAULT 0,"
+                " is_admin INTEGER DEFAULT 0,"
+                " vertical TEXT DEFAULT '',"
+                " created_at TIMESTAMPTZ DEFAULT now())"
             )
             conn.commit()
         log.info("supa: init OK")
     except Exception as e:  # noqa: BLE001
         log.warning("supa: init failed: %s", e)
 
+
+# ============================================================
+# KV（ユーザー入力データの丸ごとJSON保存）
+# ============================================================
 
 def save(key: str, obj: Any) -> bool:
     """key にデータ(JSON可能な値)を丸ごと保存。成功で True。"""
@@ -67,7 +83,7 @@ def save(key: str, obj: Any) -> bool:
         from psycopg2.extras import Json
         with _connect() as conn, conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO kawano_kv (key, data, updated_at) VALUES (%s, %s, now()) "
+                f"INSERT INTO {_KV_TABLE} (key, data, updated_at) VALUES (%s, %s, now()) "
                 "ON CONFLICT (key) DO UPDATE SET data=EXCLUDED.data, updated_at=now()",
                 (key, Json(obj)),
             )
@@ -78,50 +94,160 @@ def save(key: str, obj: Any) -> bool:
         return False
 
 
-def diagnose() -> dict:
-    """接続診断（一時的なヘルスチェック用）。例外は文字列で返す。"""
-    info = {"enabled": enabled(), "url_set": bool(_url()),
-            "url_host": "", "connected": False, "rw_ok": False, "error": ""}
-    if not enabled():
-        info["error"] = "SUPABASE_DB_URL未設定"
-        return info
-    try:
-        # ホストだけ（パスワードは出さない）
-        import re
-        m = re.search(r"@([^:/]+)", _url())
-        info["url_host"] = m.group(1) if m else "?"
-    except Exception:
-        pass
-    try:
-        import psycopg2
-    except Exception as e:  # noqa: BLE001
-        info["error"] = "psycopg2 import失敗: " + repr(e)[:150]
-        return info
-    try:
-        conn = _connect()
-        info["connected"] = True
-        with conn.cursor() as cur:
-            cur.execute("CREATE TABLE IF NOT EXISTS kawano_kv (key TEXT PRIMARY KEY, data JSONB NOT NULL, updated_at TIMESTAMPTZ DEFAULT now())")
-            from psycopg2.extras import Json
-            cur.execute("INSERT INTO kawano_kv (key,data,updated_at) VALUES (%s,%s,now()) ON CONFLICT (key) DO UPDATE SET data=EXCLUDED.data, updated_at=now()", ("__healthcheck__", Json({"ok": 1})))
-            conn.commit()
-            cur.execute("SELECT data FROM kawano_kv WHERE key=%s", ("__healthcheck__",))
-            info["rw_ok"] = cur.fetchone() is not None
-        conn.close()
-    except Exception as e:  # noqa: BLE001
-        info["error"] = repr(e)[:300]
-    return info
-
-
 def load(key: str) -> Any:
     """key のデータを取得（無ければ None）。JSONBはそのまま python の list/dict で返る。"""
     if not enabled():
         return None
     try:
         with _connect() as conn, conn.cursor() as cur:
-            cur.execute("SELECT data FROM kawano_kv WHERE key = %s", (key,))
+            cur.execute(f"SELECT data FROM {_KV_TABLE} WHERE key = %s", (key,))
             row = cur.fetchone()
             return row[0] if row else None
     except Exception as e:  # noqa: BLE001
         log.warning("supa: load %s failed: %s", key, e)
         return None
+
+
+def load_prefix(prefix: str) -> dict[str, Any]:
+    """prefix で始まる全キーのデータを {key: data} で返す（ユーザー別データの一括復元用）。"""
+    if not enabled():
+        return {}
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"SELECT key, data FROM {_KV_TABLE} WHERE key LIKE %s", (prefix + "%",))
+            return {k: d for k, d in cur.fetchall()}
+    except Exception as e:  # noqa: BLE001
+        log.warning("supa: load_prefix %s failed: %s", prefix, e)
+        return {}
+
+
+# ============================================================
+# アカウント（メール＋パスワードの永続ユーザー）
+# ============================================================
+
+def get_user(email: str) -> dict[str, Any] | None:
+    """メールでユーザーを取得（無ければ None）。"""
+    if not enabled() or not email:
+        return None
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"SELECT email, password_hash, ai_enabled, is_admin, vertical "
+                f"FROM {_USERS_TABLE} WHERE email = %s", (email,))
+            row = cur.fetchone()
+        if not row:
+            return None
+        return {"email": row[0], "password_hash": row[1],
+                "ai_enabled": bool(row[2]), "is_admin": bool(row[3]),
+                "vertical": row[4] or "", "via": "supa_pg"}
+    except Exception as e:  # noqa: BLE001
+        log.warning("supa: get_user failed: %s", e)
+        return None
+
+
+def create_user(email: str, password_hash: str, *, ai_enabled: bool = False,
+                is_admin: bool = False, vertical: str = "") -> tuple[bool, str]:
+    """ユーザー作成。成功 (True,"") / 重複 (False,理由)。"""
+    if not enabled():
+        return False, "永続化が未設定です"
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO {_USERS_TABLE} (email, password_hash, ai_enabled, is_admin, vertical) "
+                "VALUES (%s, %s, %s, %s, %s) ON CONFLICT (email) DO NOTHING",
+                (email, password_hash, int(ai_enabled), int(is_admin), vertical))
+            inserted = cur.rowcount > 0
+            conn.commit()
+        return (True, "") if inserted else (False, "このメールアドレスは既に登録されています。")
+    except Exception as e:  # noqa: BLE001
+        log.warning("supa: create_user failed: %s", e)
+        return False, "アカウント作成に失敗しました（時間をおいて再度お試しください）"
+
+
+def set_password(email: str, password_hash: str) -> bool:
+    if not enabled():
+        return False
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(f"UPDATE {_USERS_TABLE} SET password_hash = %s WHERE email = %s",
+                        (password_hash, email))
+            n = cur.rowcount
+            conn.commit()
+        return n > 0
+    except Exception as e:  # noqa: BLE001
+        log.warning("supa: set_password failed: %s", e)
+        return False
+
+
+def count_users() -> int:
+    if not enabled():
+        return 0
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM {_USERS_TABLE}")
+            return cur.fetchone()[0]
+    except Exception as e:  # noqa: BLE001
+        log.warning("supa: count_users failed: %s", e)
+        return 0
+
+
+def list_users() -> list[dict[str, Any]]:
+    if not enabled():
+        return []
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"SELECT email, ai_enabled, is_admin, vertical, created_at "
+                f"FROM {_USERS_TABLE} ORDER BY created_at")
+            return [{"email": r[0], "ai_enabled": bool(r[1]), "is_admin": bool(r[2]),
+                     "vertical": r[3] or "", "created_at": str(r[4])}
+                    for r in cur.fetchall()]
+    except Exception as e:  # noqa: BLE001
+        log.warning("supa: list_users failed: %s", e)
+        return []
+
+
+def set_ai_enabled(email: str, enabled_flag: bool) -> bool:
+    if not enabled():
+        return False
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(f"UPDATE {_USERS_TABLE} SET ai_enabled = %s WHERE email = %s",
+                        (int(enabled_flag), email))
+            n = cur.rowcount
+            conn.commit()
+        return n > 0
+    except Exception as e:  # noqa: BLE001
+        log.warning("supa: set_ai_enabled failed: %s", e)
+        return False
+
+
+def diagnose() -> dict:
+    """接続診断（ヘルスチェック用）。例外は文字列で返す。"""
+    info = {"enabled": enabled(), "connected": False, "rw_ok": False, "error": ""}
+    if not enabled():
+        info["error"] = "SUPABASE_DB_URL未設定"
+        return info
+    try:
+        import psycopg2  # noqa: F401
+    except Exception as e:  # noqa: BLE001
+        info["error"] = "psycopg2 import失敗: " + repr(e)[:150]
+        return info
+    try:
+        init()
+        conn = _connect()
+        info["connected"] = True
+        with conn.cursor() as cur:
+            from psycopg2.extras import Json
+            cur.execute(
+                f"INSERT INTO {_KV_TABLE} (key,data,updated_at) VALUES (%s,%s,now()) "
+                "ON CONFLICT (key) DO UPDATE SET data=EXCLUDED.data, updated_at=now()",
+                ("__healthcheck__", Json({"ok": 1})))
+            conn.commit()
+            cur.execute(f"SELECT data FROM {_KV_TABLE} WHERE key=%s", ("__healthcheck__",))
+            info["rw_ok"] = cur.fetchone() is not None
+        conn.close()
+    except Exception as e:  # noqa: BLE001
+        info["error"] = repr(e)[:300]
+    return info

@@ -50,6 +50,9 @@
   </main>
 </div>
 {% block scripts %}{% endblock %}
+{# Supabase永続化が有効な間は、旧来のブラウザ保存→自動復元は使わない
+   （サーバがユーザー別に保存する。共有PCで他人のデータが流れ込む事故も防ぐ）。 #}
+{% if not persist_on %}
 <script>window.__KAWANO_PROFILE_SET = {{ 'true' if profile_set else 'false' }};</script>
 <script>
 /* マイ条件のブラウザ保存→自動復元（無料ホストでディスクが揮発しても消えないように）。
@@ -131,5 +134,6 @@
   }).catch(function () { sessionStorage.setItem('kawanoAgcRestored', '1'); });
 })();
 </script>
+{% endif %}
 </body>
 </html>

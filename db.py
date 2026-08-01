@@ -80,8 +80,9 @@ CREATE INDEX IF NOT EXISTS idx_cases_deadline ON cases(deadline);
 -- procurement_type / budget_yen の索引は init_db() のマイグレーション後に作成
 -- （既存DBでは列追加が先に必要なため）。
 
-CREATE TABLE IF NOT EXISTS profile (
-    id            INTEGER PRIMARY KEY CHECK (id = 1),  -- 単一行
+-- マイ条件（ユーザーごとに1行。user_email='' は未ログイン/共有バケット）
+CREATE TABLE IF NOT EXISTS profiles (
+    user_email    TEXT PRIMARY KEY,  -- 紐づくアカウントのメール（小文字）
     company       TEXT DEFAULT '',   -- 自社名（競合一覧から自社を除外する）
     prefectures   TEXT DEFAULT '',   -- 対応エリア（都道府県, カンマ区切り）
     categories    TEXT DEFAULT '',   -- 対応業種（カンマ区切り。既定は空＝業種を決めつけない）
@@ -96,7 +97,8 @@ CREATE TABLE IF NOT EXISTS profile (
 );
 
 CREATE TABLE IF NOT EXISTS applications (
-    case_id        INTEGER PRIMARY KEY REFERENCES cases(id) ON DELETE CASCADE,
+    user_email     TEXT NOT NULL DEFAULT '',  -- 紐づくアカウント（''=未ログイン/共有）
+    case_id        INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
     status         TEXT NOT NULL DEFAULT '参加申請準備前',  -- APP_STATUSES のいずれか
     applied_date   TEXT DEFAULT '',                 -- 申請日（任意）
     note           TEXT DEFAULT '',                 -- メモ
@@ -115,16 +117,19 @@ CREATE TABLE IF NOT EXISTS applications (
     partner        TEXT DEFAULT '',                 -- 発注先の協力会社（採用見積の会社名）
     partners       TEXT DEFAULT '[]',               -- 協力会社見積（quotes・JSON配列）
     agency_override TEXT DEFAULT '',                -- 元機関(発注機関)の上書き（案件のagency修正用）
-    updated_at     TEXT DEFAULT (datetime('now'))
+    updated_at     TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (user_email, case_id)
 );
 
 -- AI応募アシストの生成結果キャッシュ（external_id=再採番に強い安定キー）。
--- 同じ案件の再タップで再課金しないために保持する（無料プランでは一切書かれない）。
+-- 判定はマイ条件に依存するためユーザーごとに別キャッシュ。再タップでは再課金しない。
 CREATE TABLE IF NOT EXISTS ai_assist (
-    external_id TEXT PRIMARY KEY,     -- 取得元の一意ID
+    user_email  TEXT NOT NULL DEFAULT '',  -- 紐づくアカウント（''=未ログイン/共有）
+    external_id TEXT NOT NULL,        -- 取得元の一意ID
     payload     TEXT NOT NULL,        -- 生成結果(JSON)
     model       TEXT DEFAULT '',      -- 使用モデル
-    created_at  TEXT DEFAULT (datetime('now'))
+    created_at  TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (user_email, external_id)
 );
 
 CREATE TABLE IF NOT EXISTS agencies (
@@ -141,12 +146,15 @@ CREATE TABLE IF NOT EXISTS agencies (
 -- 監視機関のホワイトリスト除外（チェックを外した発注機関＝案件一覧に出さない）。
 -- 既定は「全機関ON（除外なし）」。ここに入っている機関名の案件だけ非表示にする。
 CREATE TABLE IF NOT EXISTS agency_exclusions (
-    name TEXT PRIMARY KEY
+    user_email TEXT NOT NULL DEFAULT '',  -- 紐づくアカウント（''=未ログイン/共有）
+    name TEXT NOT NULL,
+    PRIMARY KEY (user_email, name)
 );
 
 -- 協力会社マスタ（bid-next-eta の X 配列に相当）。
 CREATE TABLE IF NOT EXISTS companies (
     id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_email TEXT NOT NULL DEFAULT '',  -- 紐づくアカウント（''=未ログイン/共有）
     name    TEXT NOT NULL,            -- 会社名
     area    TEXT DEFAULT '',          -- 対応エリア
     tags    TEXT DEFAULT '[]',        -- 工事カテゴリ（JSON配列）
@@ -233,22 +241,61 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _u(user: str | None) -> str:
+    """ユーザーキー（メールアドレス）を正規化。未ログインは ''（共有バケット）。
+
+    マイ条件・申請管理・AIキャッシュ等はすべてこのキーで分離する（マルチテナント）。
+    """
+    return (user or "").strip().lower()
+
+
+def _recreate_user_scoped(conn: sqlite3.Connection, table: str) -> None:
+    """旧スキーマ（user_email列なし）のテーブルを、ユーザー別スキーマで作り直す。
+
+    既存行は user_email=''（未ログイン/共有バケット）として引き継ぐ。
+    毎日のDB再生成後の初回起動で一度だけ走る軽量マイグレーション。
+    """
+    cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})")]
+    if not cols or "user_email" in cols:
+        return
+    conn.execute(f"ALTER TABLE {table} RENAME TO {table}_legacy")
+    conn.executescript(SCHEMA)  # IF NOT EXISTS なので該当テーブルだけ新規作成される
+    legacy_cols = ", ".join(cols)
+    conn.execute(
+        f"INSERT OR IGNORE INTO {table} ({legacy_cols}, user_email) "
+        f"SELECT {legacy_cols}, '' FROM {table}_legacy")
+    conn.execute(f"DROP TABLE {table}_legacy")
+
+
+def _migrate_profile_table(conn: sqlite3.Connection) -> None:
+    """旧 profile(単一行 id=1) → 新 profiles(user_email主キー) へ移行して旧を破棄。"""
+    old_cols = [r[1] for r in conn.execute("PRAGMA table_info(profile)")]
+    if not old_cols:
+        return
+    row = conn.execute("SELECT * FROM profile WHERE id = 1").fetchone()
+    if row:
+        d = {k: row[k] for k in row.keys() if k != "id"}
+        cols = [c for c in ("company", "prefectures", "categories", "budget_max", "grade",
+                            "quals", "representative", "address", "corp_number",
+                            "qualifications") if c in d]
+        conn.execute(
+            f"INSERT OR IGNORE INTO profiles (user_email, {', '.join(cols)}) "
+            f"VALUES ('', {', '.join('?' * len(cols))})",
+            tuple(d.get(c, "") for c in cols))
+    conn.execute("DROP TABLE profile")
+
+
 def init_db() -> None:
     """スキーマを作成（既存なら何もしない）＋軽量マイグレーション。"""
     with _connect() as conn:
         conn.executescript(SCHEMA)
-        # 既存DBに後から追加した列をマイグレーション（無ければ追加）
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(profile)")]
-        if "company" not in cols:
-            conn.execute("ALTER TABLE profile ADD COLUMN company TEXT DEFAULT ''")
-        for col, ddl in (
-            ("representative", "TEXT DEFAULT ''"),
-            ("address",        "TEXT DEFAULT ''"),
-            ("corp_number",    "TEXT DEFAULT ''"),
-            ("qualifications", "TEXT DEFAULT '[]'"),
-        ):
-            if col not in cols:
-                conn.execute(f"ALTER TABLE profile ADD COLUMN {col} {ddl}")
+        # ユーザー別データ分離への移行（旧スキーマのDBを引き継ぐ）
+        for t in ("applications", "ai_assist", "agency_exclusions"):
+            _recreate_user_scoped(conn, t)
+        _migrate_profile_table(conn)
+        comp_cols = [r[1] for r in conn.execute("PRAGMA table_info(companies)")]
+        if comp_cols and "user_email" not in comp_cols:
+            conn.execute("ALTER TABLE companies ADD COLUMN user_email TEXT NOT NULL DEFAULT ''")
         # cases の後付け列をマイグレーション（無ければ追加）
         case_cols = [r[1] for r in conn.execute("PRAGMA table_info(cases)")]
         if "vertical" not in case_cols:
@@ -501,27 +548,32 @@ def get_case(case_id: int) -> dict[str, Any] | None:
         return dict(row) if row else None
 
 
-def get_ai_assist(external_id: str) -> dict[str, Any] | None:
-    """AI応募アシストのキャッシュ結果を返す（無ければ None）。payload はJSON文字列のまま。"""
+def get_ai_assist(external_id: str, user: str = "") -> dict[str, Any] | None:
+    """AI応募アシストのキャッシュ結果を返す（無ければ None）。payload はJSON文字列のまま。
+
+    判定はユーザーのマイ条件に依存するため、キャッシュもユーザーごとに分離。
+    """
     if not external_id:
         return None
     with _connect() as conn:
         row = conn.execute(
-            "SELECT payload, model, created_at FROM ai_assist WHERE external_id = ?",
-            (external_id,)).fetchone()
+            "SELECT payload, model, created_at FROM ai_assist "
+            "WHERE user_email = ? AND external_id = ?",
+            (_u(user), external_id)).fetchone()
         return dict(row) if row else None
 
 
-def set_ai_assist(external_id: str, payload: str, model: str = "") -> None:
-    """AI応募アシストの結果をキャッシュに保存（external_id で上書き）。"""
+def set_ai_assist(external_id: str, payload: str, model: str = "",
+                  user: str = "") -> None:
+    """AI応募アシストの結果をキャッシュに保存（ユーザー×external_id で上書き）。"""
     with _connect() as conn:
         conn.execute(
-            """INSERT INTO ai_assist (external_id, payload, model, created_at)
-               VALUES (?, ?, ?, datetime('now'))
-               ON CONFLICT(external_id) DO UPDATE SET
+            """INSERT INTO ai_assist (user_email, external_id, payload, model, created_at)
+               VALUES (?, ?, ?, ?, datetime('now'))
+               ON CONFLICT(user_email, external_id) DO UPDATE SET
                  payload=excluded.payload, model=excluded.model,
                  created_at=excluded.created_at""",
-            (external_id, payload, model))
+            (_u(user), external_id, payload, model))
         conn.commit()
 
 
@@ -595,36 +647,41 @@ def upsert_agencies(rows: list[dict[str, Any]]) -> int:
 
 # --- 監視機関のホワイトリスト除外（チェックを外した機関の案件を一覧から消す）---
 
-def list_agency_exclusions() -> set[str]:
-    """案件一覧から除外する発注機関名の集合。"""
+def list_agency_exclusions(user: str = "") -> set[str]:
+    """指定ユーザーが案件一覧から除外する発注機関名の集合。"""
     with _connect() as conn:
-        return {r[0] for r in conn.execute("SELECT name FROM agency_exclusions")}
+        return {r[0] for r in conn.execute(
+            "SELECT name FROM agency_exclusions WHERE user_email = ?", (_u(user),))}
 
 
-def set_agency_excluded(name: str, excluded: bool) -> None:
+def set_agency_excluded(name: str, excluded: bool, user: str = "") -> None:
     """1機関の除外ON/OFF（excluded=True で除外＝チェックを外す）。"""
     name = (name or "").strip()
     if not name:
         return
     with _connect() as conn:
         if excluded:
-            conn.execute("INSERT OR IGNORE INTO agency_exclusions (name) VALUES (?)", (name,))
+            conn.execute(
+                "INSERT OR IGNORE INTO agency_exclusions (user_email, name) VALUES (?, ?)",
+                (_u(user), name))
         else:
-            conn.execute("DELETE FROM agency_exclusions WHERE name = ?", (name,))
+            conn.execute("DELETE FROM agency_exclusions WHERE user_email = ? AND name = ?",
+                         (_u(user), name))
         conn.commit()
-    _push_exclusions()
+    _push_exclusions(user)
 
 
-def replace_agency_exclusions(names: list[str]) -> None:
-    """除外リストを丸ごと置き換える（localStorage からの復元用）。"""
+def replace_agency_exclusions(names: list[str], user: str = "") -> None:
+    """指定ユーザーの除外リストを丸ごと置き換える（復元用）。"""
     clean = [str(n).strip() for n in (names or []) if str(n).strip()]
     with _connect() as conn:
-        conn.execute("DELETE FROM agency_exclusions")
+        conn.execute("DELETE FROM agency_exclusions WHERE user_email = ?", (_u(user),))
         if clean:
-            conn.executemany("INSERT OR IGNORE INTO agency_exclusions (name) VALUES (?)",
-                             [(n,) for n in clean])
+            conn.executemany(
+                "INSERT OR IGNORE INTO agency_exclusions (user_email, name) VALUES (?, ?)",
+                [(_u(user), n) for n in clean])
         conn.commit()
-    _push_exclusions()
+    _push_exclusions(user)
 
 
 def list_agencies(q: str = "") -> list[dict[str, Any]]:
@@ -882,65 +939,124 @@ _APP_TEXT_FIELDS = (
 _APP_INT_FIELDS = ("needs_check", "bid_plan", "win_amount", "award_called")
 
 
-def delete_application(case_id: int) -> None:
-    """案件を申請管理から外す（applications行を削除）。案件(cases)自体は残す。"""
+def delete_application(case_id: int, user: str = "") -> None:
+    """案件を申請管理から外す（そのユーザーのapplications行を削除）。案件(cases)自体は残す。"""
     with _connect() as conn:
-        conn.execute("DELETE FROM applications WHERE case_id = ?", (case_id,))
+        conn.execute("DELETE FROM applications WHERE user_email = ? AND case_id = ?",
+                     (_u(user), case_id))
         conn.commit()
-    _push_applications()
+    _push_applications(user)
 
 
 # ============================================================
 # Supabase 永続化（write-through ＋ 起動時復元）
 # ============================================================
 
-def _applications_for_supa() -> list[dict[str, Any]]:
-    """全申請を external_id つきで取り出す（Supabase保存用・案件ID振り直しに強い）。"""
+def _kv_key(kind: str, user: str) -> str:
+    """Supabase KVのキー。ユーザー別に分離（''は旧来の共有キーそのまま）。"""
+    u = _u(user)
+    return f"{kind}:{u}" if u else kind
+
+
+def _applications_for_supa(user: str = "") -> list[dict[str, Any]]:
+    """指定ユーザーの全申請を external_id つきで取り出す（Supabase保存用）。"""
     sql = """
         SELECT c.external_id AS external_id, a.*
         FROM applications a JOIN cases c ON c.id = a.case_id
-        WHERE c.external_id IS NOT NULL AND c.external_id != ''
+        WHERE a.user_email = ? AND c.external_id IS NOT NULL AND c.external_id != ''
     """
     with _connect() as conn:
-        rows = [dict(r) for r in conn.execute(sql).fetchall()]
+        rows = [dict(r) for r in conn.execute(sql, (_u(user),)).fetchall()]
     out = []
     for r in rows:
         r.pop("case_id", None)
+        r.pop("user_email", None)  # キー側に持つ（データ内には不要）
         r = _hydrate_application(r)  # partners を list に
         out.append(r)
     return out
 
 
-def _push_applications() -> None:
+def _push_applications(user: str = "") -> None:
     if _restoring:
         return
-    supa.save("applications", _applications_for_supa())
+    supa.save(_kv_key("applications", user), _applications_for_supa(user))
 
 
-def _push_companies() -> None:
+def _push_companies(user: str = "") -> None:
     if _restoring:
         return
-    supa.save("companies", list_companies())
+    supa.save(_kv_key("companies", user), list_companies(user))
 
 
-def _push_profile() -> None:
+def _push_profile(user: str = "") -> None:
     if _restoring:
         return
     with _connect() as conn:
-        row = conn.execute("SELECT * FROM profile WHERE id = 1").fetchone()
+        row = conn.execute("SELECT * FROM profiles WHERE user_email = ?",
+                           (_u(user),)).fetchone()
     if row:
-        supa.save("profile", _hydrate_profile(dict(row)))
+        d = _hydrate_profile(dict(row))
+        d.pop("user_email", None)
+        supa.save(_kv_key("profile", user), d)
 
 
-def _push_exclusions() -> None:
+def _push_exclusions(user: str = "") -> None:
     if _restoring:
         return
-    supa.save("agency_exclusions", sorted(list_agency_exclusions()))
+    supa.save(_kv_key("agency_exclusions", user), sorted(list_agency_exclusions(user)))
+
+
+def _restore_applications(user: str, apps: Any) -> int:
+    """1ユーザー分の申請リストを SQLite へ投入（external_id→現case_idに解決）。"""
+    n = 0
+    if not isinstance(apps, list):
+        return n
+    for it in apps:
+        ext = (it.get("external_id") or "").strip()
+        if not ext:
+            continue
+        cid = get_case_id_by_external(ext)
+        if cid is None:
+            continue
+        fields = {k: it.get(k) for k in (
+            "applied_date", "note", "assignee", "apply_deadline", "bid_deadline",
+            "open_date", "submit_method", "work", "materials", "flag",
+            "needs_check", "bid_plan", "win_amount", "award_called", "partner", "partners")}
+        try:
+            set_application(cid, it.get("status") or "参加申請準備前", user=user, **fields)
+            n += 1
+        except ValueError:
+            pass
+    return n
+
+
+def _restore_profile(user: str, prof: Any) -> int:
+    if not (isinstance(prof, dict) and (prof.get("company") or prof.get("qualifications")
+                                        or prof.get("prefectures") or prof.get("grade")
+                                        or prof.get("quals"))):
+        return 0
+    # 旧版が強制付与していた既定業種「電気工事」の残骸を掃除する:
+    # 資格・等級が何も無いのに業種だけ「電気工事」なら、ユーザーの選択ではなく
+    # 旧デフォルトとみなして空に戻す（AI判定が「自社=電気工事」と誤認しないように）。
+    cats = (prof.get("categories") or "").strip()
+    if (cats == "電気工事" and not (prof.get("grade") or prof.get("quals")
+                                    or prof.get("qualifications"))):
+        cats = ""
+    save_profile(
+        prefectures=prof.get("prefectures", ""),
+        categories=cats,
+        budget_max=prof.get("budget_max", ""),
+        grade=prof.get("grade", ""), quals=prof.get("quals", ""),
+        company=prof.get("company", ""), representative=prof.get("representative", ""),
+        address=prof.get("address", ""), corp_number=prof.get("corp_number", ""),
+        qualifications=prof.get("qualifications", []), user=user)
+    return 1
 
 
 def restore_from_supa() -> dict[str, int]:
-    """起動時：Supabaseの保存内容を SQLite へ流し込む（Supabaseが真の保存先）。
+    """起動時：Supabaseの保存内容を全ユーザー分 SQLite へ流し込む（Supabaseが真の保存先）。
 
+    キーは「kind:メールアドレス」（旧来の共有データは接尾辞なしの「kind」）。
     すべて失敗しても例外は投げない（アプリは動き続ける）。
     """
     global _restoring
@@ -948,60 +1064,36 @@ def restore_from_supa() -> dict[str, int]:
         return {}
     counts = {"applications": 0, "companies": 0, "profile": 0, "exclusions": 0}
     _restoring = True
+
+    def _kind_items(kind: str):
+        """(user, data) の列。プレフィックス一致の全ユーザー分＋旧共有キー。"""
+        items = [(k.split(":", 1)[1], v)
+                 for k, v in supa.load_prefix(kind + ":").items()]
+        legacy = supa.load(kind)
+        if legacy is not None:
+            items.append(("", legacy))
+        return items
+
     try:
-        # 申請（external_id → 現在の case_id に解決して投入）
-        apps = supa.load("applications")
-        if isinstance(apps, list):
-            for it in apps:
-                ext = (it.get("external_id") or "").strip()
-                if not ext:
-                    continue
-                cid = get_case_id_by_external(ext)
-                if cid is None:
-                    continue
-                fields = {k: it.get(k) for k in (
-                    "applied_date", "note", "assignee", "apply_deadline", "bid_deadline",
-                    "open_date", "submit_method", "work", "materials", "flag",
-                    "needs_check", "bid_plan", "win_amount", "award_called", "partner", "partners")}
-                try:
-                    set_application(cid, it.get("status") or "参加申請準備前", **fields)
-                    counts["applications"] += 1
-                except ValueError:
-                    pass
-        # 協力会社（全消し→投入）。空/欠損のときは消さない（誤って全消しする事故を防ぐ）。
-        comps = supa.load("companies")
-        if isinstance(comps, list) and comps:
-            with _connect() as conn:
-                conn.execute("DELETE FROM companies")
-                conn.commit()
-            for c in comps:
-                c.pop("id", None)
-                upsert_company(c)
-                counts["companies"] += 1
-        # マイ条件
-        prof = supa.load("profile")
-        if isinstance(prof, dict) and (prof.get("company") or prof.get("qualifications")):
-            # 旧版が強制付与していた既定業種「電気工事」の残骸を掃除する:
-            # 資格・等級が何も無いのに業種だけ「電気工事」なら、ユーザーの選択ではなく
-            # 旧デフォルトとみなして空に戻す（AI判定が「自社=電気工事」と誤認しないように）。
-            cats = (prof.get("categories") or "").strip()
-            if (cats == "電気工事" and not (prof.get("grade") or prof.get("quals")
-                                            or prof.get("qualifications"))):
-                cats = ""
-            save_profile(
-                prefectures=prof.get("prefectures", ""),
-                categories=cats,
-                budget_max=prof.get("budget_max", ""),
-                grade=prof.get("grade", ""), quals=prof.get("quals", ""),
-                company=prof.get("company", ""), representative=prof.get("representative", ""),
-                address=prof.get("address", ""), corp_number=prof.get("corp_number", ""),
-                qualifications=prof.get("qualifications", []))
-            counts["profile"] = 1
+        for user, apps in _kind_items("applications"):
+            counts["applications"] += _restore_applications(user, apps)
+        # 協力会社（ユーザーごとに全消し→投入）。空/欠損は消さない（全消し事故防止）。
+        for user, comps in _kind_items("companies"):
+            if isinstance(comps, list) and comps:
+                with _connect() as conn:
+                    conn.execute("DELETE FROM companies WHERE user_email = ?", (_u(user),))
+                    conn.commit()
+                for c in comps:
+                    c.pop("id", None)
+                    upsert_company(c, user=user)
+                    counts["companies"] += 1
+        for user, prof in _kind_items("profile"):
+            counts["profile"] += _restore_profile(user, prof)
         # 監視機関の除外。空/欠損のときは置換しない（既存を消さない）。
-        exc = supa.load("agency_exclusions")
-        if isinstance(exc, list) and exc:
-            replace_agency_exclusions(exc)
-            counts["exclusions"] = len(exc)
+        for user, exc in _kind_items("agency_exclusions"):
+            if isinstance(exc, list) and exc:
+                replace_agency_exclusions(exc, user=user)
+                counts["exclusions"] += len(exc)
     except Exception as e:  # noqa: BLE001 — 復元失敗でアプリを落とさない
         import logging
         logging.getLogger(__name__).warning("supa restore failed: %s", e)
@@ -1010,8 +1102,8 @@ def restore_from_supa() -> dict[str, int]:
     return counts
 
 
-def set_application(case_id: int, status: str, **fields: Any) -> None:
-    """案件の入札参加申請ステータスと管理項目を登録・更新する。
+def set_application(case_id: int, status: str, user: str = "", **fields: Any) -> None:
+    """案件の入札参加申請ステータスと管理項目を、指定ユーザーの枠に登録・更新する。
 
     fields には _APP_TEXT_FIELDS / _APP_INT_FIELDS と partners(quotes) を渡せる。
     未指定の列はデフォルト（空文字 / 0 / '[]'）になる。
@@ -1040,17 +1132,17 @@ def set_application(case_id: int, status: str, **fields: Any) -> None:
     vals.append(_normalize_partners(fields.get("partners", [])))
 
     set_clause = ", ".join(f"{c}=excluded.{c}" for c in cols)
-    placeholders = ", ".join(["?"] * (len(cols) + 1))  # +case_id
+    placeholders = ", ".join(["?"] * (len(cols) + 2))  # +user_email +case_id
     with _connect() as conn:
         conn.execute(
-            f"""INSERT INTO applications (case_id, {', '.join(cols)}, updated_at)
+            f"""INSERT INTO applications (user_email, case_id, {', '.join(cols)}, updated_at)
                 VALUES ({placeholders}, datetime('now'))
-                ON CONFLICT(case_id) DO UPDATE SET
+                ON CONFLICT(user_email, case_id) DO UPDATE SET
                   {set_clause}, updated_at=datetime('now')""",
-            (case_id, *vals),
+            (_u(user), case_id, *vals),
         )
         conn.commit()
-    _push_applications()
+    _push_applications(user)
 
 
 def _hydrate_application(row: dict[str, Any]) -> dict[str, Any]:
@@ -1063,16 +1155,17 @@ def _hydrate_application(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
-def get_application(case_id: int) -> dict[str, Any] | None:
+def get_application(case_id: int, user: str = "") -> dict[str, Any] | None:
     with _connect() as conn:
         row = conn.execute(
-            "SELECT * FROM applications WHERE case_id = ?", (case_id,)
+            "SELECT * FROM applications WHERE user_email = ? AND case_id = ?",
+            (_u(user), case_id)
         ).fetchone()
         return _hydrate_application(dict(row)) if row else None
 
 
-def list_applications(status: str | None = None) -> list[dict[str, Any]]:
-    """申請管理一覧（案件情報をJOINして返す）。新しい更新順。"""
+def list_applications(status: str | None = None, user: str = "") -> list[dict[str, Any]]:
+    """指定ユーザーの申請管理一覧（案件情報をJOINして返す）。新しい更新順。"""
     sql = """
         SELECT a.*,
                c.title,
@@ -1082,10 +1175,11 @@ def list_applications(status: str | None = None) -> list[dict[str, Any]]:
                c.external_id, c.budget, c.winner, c.win_price, c.spec_status
         FROM applications a
         JOIN cases c ON c.id = a.case_id
+        WHERE a.user_email = ?
     """
-    params: list[Any] = []
+    params: list[Any] = [_u(user)]
     if status:
-        sql += " WHERE a.status = ?"
+        sql += " AND a.status = ?"
         params.append(status)
     sql += " ORDER BY a.updated_at DESC"
     with _connect() as conn:
@@ -1107,17 +1201,18 @@ def _hydrate_company(row: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
-def list_companies() -> list[dict[str, Any]]:
-    """協力会社一覧（★よく頼む→評価の高い順）。"""
+def list_companies(user: str = "") -> list[dict[str, Any]]:
+    """指定ユーザーの協力会社一覧（★よく頼む→評価の高い順）。"""
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT * FROM companies ORDER BY partner DESC, rating DESC, name ASC"
+            "SELECT * FROM companies WHERE user_email = ? "
+            "ORDER BY partner DESC, rating DESC, name ASC", (_u(user),)
         ).fetchall()
     return [_hydrate_company(dict(r)) for r in rows]
 
 
-def upsert_company(data: dict[str, Any]) -> int:
-    """協力会社を登録／更新する。id があれば更新。会社IDを返す。"""
+def upsert_company(data: dict[str, Any], user: str = "") -> int:
+    """協力会社を登録／更新する。id があれば更新（本人の行のみ）。会社IDを返す。"""
     import json
     cid = data.get("id")
     vals = (
@@ -1135,27 +1230,30 @@ def upsert_company(data: dict[str, Any]) -> int:
         if cid:
             conn.execute(
                 """UPDATE companies SET name=?, area=?, tags=?, tel=?, url=?,
-                   note=?, partner=?, rating=?, reviews=? WHERE id=?""",
-                (*vals, int(cid)),
+                   note=?, partner=?, rating=?, reviews=?
+                   WHERE id=? AND user_email=?""",
+                (*vals, int(cid), _u(user)),
             )
             conn.commit()
             ret = int(cid)
         else:
             cur = conn.execute(
-                """INSERT INTO companies (name, area, tags, tel, url, note, partner, rating, reviews)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""", vals,
+                """INSERT INTO companies (user_email, name, area, tags, tel, url, note,
+                                          partner, rating, reviews)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (_u(user), *vals),
             )
             conn.commit()
             ret = int(cur.lastrowid)
-    _push_companies()
+    _push_companies(user)
     return ret
 
 
-def delete_company(company_id: int) -> None:
+def delete_company(company_id: int, user: str = "") -> None:
     with _connect() as conn:
-        conn.execute("DELETE FROM companies WHERE id=?", (company_id,))
+        conn.execute("DELETE FROM companies WHERE id=? AND user_email=?",
+                     (company_id, _u(user)))
         conn.commit()
-    _push_companies()
+    _push_companies(user)
 
 
 def count_companies() -> int:
@@ -1364,10 +1462,11 @@ def default_profile() -> dict[str, Any]:
     }
 
 
-def get_profile() -> dict[str, Any]:
-    """マイ条件を取得。profile行が無ければ汎用の空プロフィールを返す（Supabase等で復元）。"""
+def get_profile(user: str = "") -> dict[str, Any]:
+    """指定ユーザーのマイ条件を取得。無ければ汎用の空プロフィールを返す。"""
     with _connect() as conn:
-        row = conn.execute("SELECT * FROM profile WHERE id = 1").fetchone()
+        row = conn.execute(
+            "SELECT * FROM profiles WHERE user_email = ?", (_u(user),)).fetchone()
     if not row:
         return default_profile()
     return _hydrate_profile(dict(row))
@@ -1400,27 +1499,28 @@ def _normalize_qualifications(quals: Any) -> str:
 def save_profile(prefectures: str, categories: str, budget_max: str,
                  grade: str = "", quals: str = "", company: str = "",
                  representative: str = "", address: str = "",
-                 corp_number: str = "", qualifications: Any = None) -> None:
-    """マイ条件を保存（単一行 upsert）。"""
+                 corp_number: str = "", qualifications: Any = None,
+                 user: str = "") -> None:
+    """指定ユーザーのマイ条件を保存（ユーザーごと1行の upsert）。"""
     quals_json = _normalize_qualifications(qualifications if qualifications is not None else [])
     with _connect() as conn:
         conn.execute(
-            """INSERT INTO profile
-                 (id, company, prefectures, categories, budget_max, grade, quals,
+            """INSERT INTO profiles
+                 (user_email, company, prefectures, categories, budget_max, grade, quals,
                   representative, address, corp_number, qualifications, updated_at)
-               VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-               ON CONFLICT(id) DO UPDATE SET
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+               ON CONFLICT(user_email) DO UPDATE SET
                  company=excluded.company, prefectures=excluded.prefectures,
                  categories=excluded.categories, budget_max=excluded.budget_max,
                  grade=excluded.grade, quals=excluded.quals,
                  representative=excluded.representative, address=excluded.address,
                  corp_number=excluded.corp_number, qualifications=excluded.qualifications,
                  updated_at=datetime('now')""",
-            (company, prefectures, categories, budget_max, grade, quals,
+            (_u(user), company, prefectures, categories, budget_max, grade, quals,
              representative, address, corp_number, quals_json),
         )
         conn.commit()
-    _push_profile()
+    _push_profile(user)
 
 
 def match_cases(profile: dict[str, Any], limit: int = 300) -> list[dict[str, Any]]:
