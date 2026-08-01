@@ -35,8 +35,9 @@ import procurement
 
 _ENV_PATH = Path(__file__).parent / ".env"
 _API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
-# 全文PDFを読ませる最大文字数（Geminiの入力。3〜7千字が普通なので余裕を持たせる）。
-_PDF_MAX_CHARS = 14000
+# 全文PDFを読ませる最大文字数（Geminiの入力。3〜7千字が普通なので余裕を持たせる。
+# flash は入力トークンが安く1Mコンテキストなので、様式・記載要領まで届くよう広めに取る）。
+_PDF_MAX_CHARS = 28000
 
 
 def _fetch_pdf_text(url: str, timeout: int = 25) -> str:
@@ -317,12 +318,20 @@ def _call_gemini(user_text: str, *, system: str | None = None,
     req = urllib.request.Request(
         url, data=json.dumps(body).encode("utf-8"),
         headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=60) as res:
-        data = json.loads(res.read().decode("utf-8"))
-    cand = (data.get("candidates") or [{}])[0]
-    parts = (cand.get("content") or {}).get("parts") or [{}]
-    text = parts[0].get("text", "{}")
-    return json.loads(text)
+
+    def _once() -> dict[str, Any]:
+        with urllib.request.urlopen(req, timeout=90) as res:
+            data = json.loads(res.read().decode("utf-8"))
+        cand = (data.get("candidates") or [{}])[0]
+        parts = (cand.get("content") or {}).get("parts") or [{}]
+        text = parts[0].get("text", "{}")
+        return json.loads(text)
+
+    # flash運用の堅牢化: 応答JSONが稀に壊れる（途中切れ等）ため1回だけ再試行する。
+    try:
+        return _once()
+    except (ValueError, KeyError):
+        return _once()
 
 
 def assist(case: dict, profile: dict | None = None,
@@ -601,6 +610,30 @@ _DOC_SYSTEM = (
 )
 
 
+def _postfill_doc_fields(data: dict[str, Any], profile: dict | None) -> dict[str, Any]:
+    """マイ条件にある基本事実を fields に確実に反映する（決定的な補完）。
+
+    flash がたまに自動入力を書き漏らしても、コード側で社名・代表者・住所・
+    法人番号を先頭に補う（値が既に fields/body に入っていれば足さない）。
+    """
+    p = profile or {}
+    fields = list(data.get("fields") or [])
+    body = data.get("body") or ""
+
+    def _already(v: str) -> bool:
+        return any(v in (f.get("value") or "") for f in fields) or (v in body)
+
+    std = [("商号又は名称", str(p.get("company") or "").strip()),
+           ("代表者氏名", str(p.get("representative") or "").strip()),
+           ("所在地", str(p.get("address") or "").strip()),
+           ("法人番号", str(p.get("corp_number") or "").strip())]
+    add = [{"label": lb, "value": v, "todo": ""}
+           for lb, v in std if v and not _already(v)]
+    if add:
+        data["fields"] = add + fields
+    return data
+
+
 def doc_draft(case: dict, doc_name: str, profile: dict | None = None,
               requirements: dict | None = None) -> dict[str, Any]:
     """提出書類1件の下書きをオンデマンド生成して返す（assist と同じ流儀）。"""
@@ -637,6 +670,7 @@ def doc_draft(case: dict, doc_name: str, profile: dict | None = None,
         return {"enabled": True, "error": f"AI応答の解析に失敗しました: {e}"[:200]}
     if not isinstance(data, dict):
         return {"enabled": True, "error": "AI応答が想定外の形式でした"}
+    data = _postfill_doc_fields(data, profile)
     data["enabled"] = True
     data["model"] = _model()
     data["source"] = "pdf_full" if notice_text else "description"
