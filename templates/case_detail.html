@@ -373,11 +373,12 @@ window.dlnSaveOutput = function (caseId, kind, title, content, btn) {
   var esc = function (s) {
     var d = document.createElement('div'); d.textContent = (s == null ? '' : s); return d.innerHTML;
   };
-  btn.addEventListener('click', function () {
+  function run(refresh) {
     out.hidden = false;
     out.innerHTML = '<p class="muted small">公告ページを読みに行っています…</p>';
     btn.disabled = true;
-    fetch('/case/' + box.getAttribute('data-case-id') + '/notice-assets', { method: 'POST' })
+    var url = '/case/' + box.getAttribute('data-case-id') + '/notice-assets' + (refresh ? '?refresh=1' : '');
+    fetch(url, { method: 'POST' })
       .then(function (r) { return r.json(); })
       .then(function (d) {
         var links = d.links || [];
@@ -395,9 +396,11 @@ window.dlnSaveOutput = function (caseId, kind, title, content, btn) {
         if (docs.length) html += '<h4>資料（公告・仕様書など）</h4><ul>' + docs.map(item).join('') + '</ul>';
         out.innerHTML = html;
       })
-      .catch(function () { out.innerHTML = '<p class="muted small">取得に失敗しました。再度お試しください。</p>'; })
-      .finally(function () { btn.disabled = false; btn.textContent = 'もう一度探す'; });
-  });
+      .catch(function () { out.innerHTML = '<p class="muted small">取得に失敗しました。「もう一度探す」でお試しください。</p>'; })
+      .finally(function () { btn.disabled = false; btn.hidden = false; });
+  }
+  btn.addEventListener('click', function () { run(true); });
+  run(false);  // ページを開いたら自動で探しに行く（結果は案件共有キャッシュで2回目から即表示）
 })();
 </script>
 <script>
