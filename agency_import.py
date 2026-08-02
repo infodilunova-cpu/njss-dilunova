@@ -127,7 +127,8 @@ def load_all_orgs(path: str = ALL_ORGS_CSV) -> int:
     既存の監視機関（スプシ＋dokuho CSV由来・公式URL解決済み）は上書きしない。
     is_new=1 の機関だけを追加する（公式URLは未解決＝名前・県・案件数のみ。
     応募ガイドのポータル判定は名前マッチで動くため、まず名簿に載せることが重要）。
-    ※「［閉鎖］」印の機関は募集が無いので除外。
+    「［閉鎖］」印の機関も名簿に含める（NJSS全9,044機関を1件残らず持つ方針。
+    名前に閉鎖マークが付いたままなので誤誘導にはならない）。
     """
     import os
 
@@ -135,8 +136,7 @@ def load_all_orgs(path: str = ALL_ORGS_CSV) -> int:
         return 0
     db.init_db()
     with open(path, newline="", encoding="utf-8-sig") as f:
-        rows = [r for r in csv.DictReader(f)
-                if r.get("is_new") == "1" and not r["name"].startswith("［閉鎖］")]
+        rows = [r for r in csv.DictReader(f) if r.get("is_new") == "1"]
     existing = {a["name"] for a in db.list_agencies()}
     fresh = [r for r in rows if r["name"] not in existing]
     return db.upsert_agencies(fresh) if fresh else 0
