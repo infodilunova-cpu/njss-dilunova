@@ -24,28 +24,32 @@
   </tbody></table>
 
   {% if usage %}
+  {% set markup = usage.markup or 20 %}
+  {# 原価(円)を出すマクロ相当の式。表示は「原価」と「請求目安(×倍率)」の2本立て #}
   <h1 style="margin-top:28px">AI利用カウンター（課金の見える化）</h1>
-  <p class="sub">生成1回ごとに記録（キャッシュ再表示は課金されないため数えません）。料金は
-    gemini-2.5-flash の目安単価（入力$0.30/M・出力$2.50/M・150円/$）による概算です。</p>
-  <table><thead><tr><th></th><th>回数</th><th>入力トークン</th><th>出力トークン</th><th>概算料金</th></tr></thead><tbody>
+  <p class="sub">生成1回ごとに記録（キャッシュ再表示は数えません）。原価はAPI実費の概算、
+    請求目安は原価×{{ '%g' % markup }}倍（環境変数 AI_PRICE_MARKUP で変更可）です。</p>
+  <table><thead><tr><th></th><th>回数</th><th>原価（実費）</th><th>請求目安（×{{ '%g' % markup }}）</th></tr></thead><tbody>
+    {% set mc = (usage.month_total.tokens_in / 1000000 * 0.30 + usage.month_total.tokens_out / 1000000 * 2.50) * 150 %}
+    {% set ac = (usage.all_total.tokens_in / 1000000 * 0.30 + usage.all_total.tokens_out / 1000000 * 2.50) * 150 %}
     <tr><td><strong>今月合計</strong></td>
         <td>{{ usage.month_total.count }}</td>
-        <td>{{ '{:,}'.format(usage.month_total.tokens_in) }}</td>
-        <td>{{ '{:,}'.format(usage.month_total.tokens_out) }}</td>
-        <td><strong>約 {{ '%.1f' % ((usage.month_total.tokens_in / 1000000 * 0.30 + usage.month_total.tokens_out / 1000000 * 2.50) * 150) }} 円</strong></td></tr>
+        <td>約 {{ '%.1f' % mc }} 円</td>
+        <td><strong>約 {{ '{:,}'.format((mc * markup) | round | int) }} 円</strong></td></tr>
     <tr><td>累計（全期間）</td>
         <td>{{ usage.all_total.count }}</td>
-        <td>{{ '{:,}'.format(usage.all_total.tokens_in) }}</td>
-        <td>{{ '{:,}'.format(usage.all_total.tokens_out) }}</td>
-        <td>約 {{ '%.1f' % ((usage.all_total.tokens_in / 1000000 * 0.30 + usage.all_total.tokens_out / 1000000 * 2.50) * 150) }} 円</td></tr>
+        <td>約 {{ '%.1f' % ac }} 円</td>
+        <td>約 {{ '{:,}'.format((ac * markup) | round | int) }} 円</td></tr>
   </tbody></table>
   {% if usage.month_by_user %}
-  <table style="margin-top:10px"><thead><tr><th>ユーザー（今月）</th><th>機能</th><th>回数</th><th>概算料金</th></tr></thead><tbody>
+  <table style="margin-top:10px"><thead><tr><th>ユーザー（今月）</th><th>機能</th><th>回数</th><th>原価</th><th>請求目安</th></tr></thead><tbody>
     {% for r in usage.month_by_user %}
+    {% set rc = (r.tokens_in / 1000000 * 0.30 + r.tokens_out / 1000000 * 2.50) * 150 %}
     <tr><td>{{ r.email or '（未ログイン）' }}</td>
         <td>{{ {'assist': 'AI判定', 'plan': '準備プラン', 'doc': '書類下書き'}.get(r.kind, r.kind) }}</td>
         <td>{{ r.count }}</td>
-        <td>約 {{ '%.1f' % ((r.tokens_in / 1000000 * 0.30 + r.tokens_out / 1000000 * 2.50) * 150) }} 円</td></tr>
+        <td>約 {{ '%.1f' % rc }} 円</td>
+        <td>約 {{ '{:,}'.format((rc * markup) | round | int) }} 円</td></tr>
     {% endfor %}
   </tbody></table>
   {% endif %}

@@ -477,13 +477,18 @@ def settings():
                 flash("パスワードを変更しました。" if done else msg,
                       "ok" if done else "error")
         return redirect(url_for("auth.settings"))
-    # AI利用カウンター（今月・自分の分。gemini-2.5-flash単価×150円/$の概算）
+    # AI利用カウンター（今月・自分の分）。ユーザーに見せる金額は原価ではなく
+    # 「原価×AI_PRICE_MARKUP（既定20倍）」の利用料。モデル名などのAI内部情報は出さない。
     usage = None
     if u and _pg():
         import supa
         usage = supa.usage_for(u.get("email", ""))
-        usage["cost_yen"] = round(
-            (usage["tokens_in"] / 1e6 * 0.30 + usage["tokens_out"] / 1e6 * 2.50) * 150, 1)
+        cost = (usage["tokens_in"] / 1e6 * 0.30 + usage["tokens_out"] / 1e6 * 2.50) * 150
+        try:
+            markup = float(os.environ.get("AI_PRICE_MARKUP", "20") or 20)
+        except ValueError:
+            markup = 20.0
+        usage["price_yen"] = int(round(cost * markup))
     return render_template("auth/settings.html", provider=provider, usage=usage)
 
 
@@ -503,8 +508,13 @@ def admin_users():
         return redirect(url_for("auth.admin_users"))
     if _pg():
         import supa
+        usage = supa.usage_summary()
+        try:
+            usage["markup"] = float(os.environ.get("AI_PRICE_MARKUP", "20") or 20)
+        except ValueError:
+            usage["markup"] = 20.0
         return render_template("auth/admin_users.html", users=supa.list_users(),
-                               usage=supa.usage_summary())
+                               usage=usage)
     return render_template("auth/admin_users.html", users=list_users(), usage=None)
 
 

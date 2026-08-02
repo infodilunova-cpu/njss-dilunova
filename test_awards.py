@@ -71,9 +71,15 @@ def test_row_to_case_electrical():
     assert c["announced_date"] == "2026-04-01"
 
 
-def test_row_to_case_excludes_power_purchase():
-    """"使用する電気の購入"（小売電力契約）は電気工事ではないので除外＝None。"""
-    assert a._row_to_case(_DENKI_KOUNYU_ROW) is None
+def test_row_to_case_keeps_power_purchase_as_other():
+    """"使用する電気の購入"等の汎用調達も保持する（過去実績照合のため全件保持へ仕様変更）。
+
+    毎年同名で出る定例調達の「前回いくらで誰が落札したか」を答えるのが目的なので、
+    分類が「その他」でも捨てない。カテゴリはそのまま付く。
+    """
+    c = a._row_to_case(_DENKI_KOUNYU_ROW)
+    assert c is not None
+    assert c["winner"]  # 落札者は入っている
 
 
 def test_row_to_case_short_or_empty():
@@ -85,12 +91,13 @@ def test_row_to_case_short_or_empty():
 
 
 def test_parse_rows_dedup_and_filter():
-    """電気系のみ採用し、同一案件番号は一意化される。"""
+    """全件保持（業種フィルタなし）で、同一案件番号は一意化される。"""
     rows = [_ELEC_ROW, _DENKI_KOUNYU_ROW, _LED_ROW, list(_ELEC_ROW)]  # 末尾は重複
     out = a.parse_rows(rows)
     ids = {c["external_id"] for c in out}
-    assert ids == {"PPORTAL-0000000000000554903", "PPORTAL-0000000000000600001"}
-    assert len(out) == 2  # 電気購入は除外、重複は1件に
+    assert "PPORTAL-0000000000000554903" in ids
+    assert "PPORTAL-0000000000000600001" in ids
+    assert len(out) == 3  # 電気購入も保持、重複だけ1件に
 
 
 def _run_all():

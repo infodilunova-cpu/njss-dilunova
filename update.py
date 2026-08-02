@@ -139,8 +139,10 @@ def run(reset: bool = False, koukai_instances: list[str] | None = None,
         try:
             import awards_scraper
             if full:
-                n_aw = awards_scraper.load(years=2)
-                print(f"[調達ポータル落札実績] {n_aw} 件（直近2年・電気工事系）")
+                # 5年分（ポータルに存在する全年度）＝「この案件は過去いくらで
+                # 誰が落札したか」の照合ヒット率を最大化する
+                n_aw = awards_scraper.load(years=5)
+                print(f"[調達ポータル落札実績] {n_aw} 件（直近5年）")
             else:
                 n_aw = awards_scraper.load_diff(days=7)
                 print(f"[調達ポータル落札実績] {n_aw} 件（直近差分・電気工事系）")

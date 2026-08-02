@@ -61,13 +61,12 @@
 {% if usage %}
 <section class="pf-block">
   <h2>AI利用状況（今月・このアカウント）</h2>
-  <p class="pf-hint">AI判定・準備プラン・書類下書きの生成回数です（キャッシュ再表示は課金されないため数えません）。</p>
+  <p class="pf-hint">AI判定・準備プラン・書類下書きの生成回数です（一度生成した結果の再表示は無料・回数に入りません）。</p>
   <div class="pf-grid">
     <div class="pf-fld"><span>生成回数</span>
       <p class="settings-value">{{ usage.count }} 回</p></div>
-    <div class="pf-fld"><span>概算API料金</span>
-      <p class="settings-value">約 {{ usage.cost_yen }} 円
-        <span class="muted small">（gemini-2.5-flash 単価の概算）</span></p></div>
+    <div class="pf-fld"><span>AI利用料の目安</span>
+      <p class="settings-value">約 {{ '{:,}'.format(usage.price_yen) }} 円</p></div>
   </div>
 </section>
 {% endif %}

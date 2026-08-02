@@ -122,30 +122,46 @@
     <p class="ai-lead">締切から逆算したスケジュール・提出書類・参加申請書に使える自社紹介文の下書き・
       入札額の目安まで、<strong>入札書を出す直前</strong>の段取りをまとめて用意します。</p>
 
-    {# 入札額の目安（落札実績の統計）。非AIの確定値なのでサーバ側で常時表示し、AIの結果と並記する。 #}
-    {% if price_guide %}
+    {# 入札額の一番の参考=「この案件（同名・類似）が過去にいくらで誰に落札されたか」。
+       非AIの確定値（調達ポータル落札実績・直近5年）をサーバ側で常時表示する。 #}
     <div class="price-guide">
-      <h3>入札額の目安 — 落札実績の統計（AI不使用）</h3>
+      <h3>この案件の過去の落札実績（同名・類似案件）</h3>
+      {% if past_awards %}
       <ul class="pg-list">
-        {% if price_guide.category_stats %}{% set s = price_guide.category_stats %}
-        <li>同カテゴリ「{{ c.category }}」の落札額（{{ s.count }}件）:
-          中央値 <strong>{{ '{:,}'.format(s.median) }}円</strong>
-          <span class="muted">（25〜75%: {{ '{:,}'.format(s.p25) }}〜{{ '{:,}'.format(s.p75) }}円）</span></li>
-        {% endif %}
-        {% if price_guide.agency_stats %}{% set s = price_guide.agency_stats %}
-        <li>同一機関「{{ c.agency }}」の同カテゴリ落札額（{{ s.count }}件）:
-          中央値 <strong>{{ '{:,}'.format(s.median) }}円</strong>
-          <span class="muted">（25〜75%: {{ '{:,}'.format(s.p25) }}〜{{ '{:,}'.format(s.p75) }}円）</span></li>
-        {% endif %}
-        {% if price_guide.win_rate %}
-        <li>予定価格に対する落札率の中央値 {{ '%.1f' % (price_guide.win_rate.median * 100) }}%（{{ price_guide.win_rate.count }}件）
-          {%- if c.budget_yen %} → この案件の予定価格 {{ '{:,}'.format(c.budget_yen) }}円 なら
-          目安 <strong>{{ '{:,}'.format((c.budget_yen * price_guide.win_rate.median) | round | int) }}円</strong>{% endif %}</li>
-        {% endif %}
+        {% for p in past_awards[:5] %}
+        <li>{% if p.kind == 'same' %}<span class="tag same-tag">同名</span>{% else %}<span class="tag">類似</span>{% endif %}
+          {{ p.announced_date or '時期不明' }}　{{ p.title }} →
+          <strong>{{ p.winner }}</strong> が <strong>{{ p.win_price or '金額不明' }}</strong> で落札</li>
+        {% endfor %}
       </ul>
-      <p class="pg-note muted small">過去の落札実績からの統計値です。実際の入札額は仕様書と積算で必ず精査してください。</p>
+      <p class="pg-note muted small">詳細は下の「この案件の過去実績」表へ。入札額はこの前回実績を軸に、仕様書と積算で精査してください。</p>
+      {% else %}
+      <p class="pg-note muted">同名・類似案件の過去実績は、落札データ（直近5年・毎日更新）からは見つかりませんでした。
+        新規性の高い案件か、地方自治体発注（国の落札データに載らない）可能性があります。</p>
+      {% endif %}
+      {% if price_guide %}
+      <details class="pg-stats">
+        <summary class="muted small">参考: 同カテゴリ全体の相場統計を見る</summary>
+        <ul class="pg-list">
+          {% if price_guide.category_stats %}{% set s = price_guide.category_stats %}
+          <li>同カテゴリ「{{ c.category }}」の落札額（{{ s.count }}件）:
+            中央値 <strong>{{ '{:,}'.format(s.median) }}円</strong>
+            <span class="muted">（25〜75%: {{ '{:,}'.format(s.p25) }}〜{{ '{:,}'.format(s.p75) }}円）</span></li>
+          {% endif %}
+          {% if price_guide.agency_stats %}{% set s = price_guide.agency_stats %}
+          <li>同一機関「{{ c.agency }}」の同カテゴリ落札額（{{ s.count }}件）:
+            中央値 <strong>{{ '{:,}'.format(s.median) }}円</strong>
+            <span class="muted">（25〜75%: {{ '{:,}'.format(s.p25) }}〜{{ '{:,}'.format(s.p75) }}円）</span></li>
+          {% endif %}
+          {% if price_guide.win_rate %}
+          <li>予定価格に対する落札率の中央値 {{ '%.1f' % (price_guide.win_rate.median * 100) }}%（{{ price_guide.win_rate.count }}件）
+            {%- if c.budget_yen %} → この案件の予定価格 {{ '{:,}'.format(c.budget_yen) }}円 なら
+            目安 <strong>{{ '{:,}'.format((c.budget_yen * price_guide.win_rate.median) | round | int) }}円</strong>{% endif %}</li>
+          {% endif %}
+        </ul>
+      </details>
+      {% endif %}
     </div>
-    {% endif %}
 
     <button type="button" class="btn primary" id="planRun">
       {% if plan_cached %}プランを見る{% else %}AIで入札準備プランを作る{% endif %}

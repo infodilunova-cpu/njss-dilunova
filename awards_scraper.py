@@ -150,12 +150,11 @@ def _row_to_case(cols: list[str]) -> dict | None:
     if not item_no or not title or not winner:
         return None
 
-    # 全業種で分類（DiluNovaは業種統合）。旧: is_electrical()で電気のみ通していたが、
-    # DiluNova版のis_electricalは常にFalseのため全件棄却＝落札実績が0件になっていた。
-    # 分類ルールに当たらない「その他」（大半が汎用物品購入）だけ除外してノイズを抑える。
+    # 全業種で分類（DiluNovaは業種統合）。「その他」も除外しない＝全件保持する。
+    # 目的が「この案件は過去いくらで誰が落札したか」の照合になったため、
+    # 汎用物品購入（毎年同名で出る定例調達の典型）を落とすと照合ヒット率が下がる。
+    # 一覧のノイズにはならない（落札実績は募集中タブから隠れる）。
     category = kkj_scraper.classify_category(title, title=title, vertical="all")
-    if category == "その他":
-        return None
 
     ministry_cd = (cols[_COL_MINISTRY] or "").strip()
     method_cd = (cols[_COL_METHOD] or "").strip()
@@ -201,12 +200,19 @@ def fetch_year(year: int) -> list[dict]:
 
 
 def fetch_recent_years(years: int = 2) -> list[dict]:
-    """直近 years 年分の全件データを横断取得して external_id で一意化して返す。"""
+    """直近 years 年分の全件データを横断取得して external_id で一意化して返す。
+
+    年度ファイルが存在しない・一時的に落ちている年はスキップして続行する
+    （過去データを増やすほど「この案件は前回いくらで落札されたか」の照合が効く）。
+    """
     this_year = datetime.date.today().year
     seen: dict[str, dict] = {}
     for y in range(this_year, this_year - years, -1):
-        for case in fetch_year(y):
-            seen[case["external_id"]] = case
+        try:
+            for case in fetch_year(y):
+                seen[case["external_id"]] = case
+        except Exception as e:  # noqa: BLE001 — 1年分の欠損で全体を止めない
+            print(f"[調達ポータル] {y}年度分の取得失敗（スキップ）: {str(e)[:60]}")
     return list(seen.values())
 
 
