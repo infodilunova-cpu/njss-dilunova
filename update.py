@@ -153,7 +153,9 @@ def run(reset: bool = False, koukai_instances: list[str] | None = None,
             import agency_import
             n_ag = agency_import.load()
             n_ex = agency_import.load_extra()
-            print(f"[監視機関リスト] {n_ag} 機関＋NJSS元機関リスト {n_ex} 機関")
+            n_all = agency_import.load_all_orgs()
+            print(f"[監視機関リスト] {n_ag} 機関＋NJSS元機関リスト {n_ex} 機関"
+                  f"＋全機関棚卸し新規 {n_all} 機関")
             if n_ag == 0:
                 # 致命ではない（案件は出る）が、応募ガイドのポータル判定や監視機関ページが
                 # 空になるためビルドログで気付けるよう目立たせる。スプシ非公開化が典型原因。

@@ -28,3 +28,8 @@ newscreen/
 応募ターゲット_*.csv
 応募準備_*.md
 .kkj_checkpoint.jsonl
+
+# NJSSログインセッション（ローカルのみ・絶対にコミットしない）
+.njss_state.json
+.njss_org_pages.jsonl
+.njss_profile/

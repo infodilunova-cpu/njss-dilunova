@@ -118,7 +118,33 @@ def load_extra(path: str = EXTRA_CSV) -> int:
     return db.upsert_agencies(fresh) if fresh else 0
 
 
+ALL_ORGS_CSV = "research/njss_all_organizations.csv"
+
+
+def load_all_orgs(path: str = ALL_ORGS_CSV) -> int:
+    """NJSS全機関棚卸しCSV（9,044機関・2026-08取得）の「新規分」を取り込む。
+
+    既存の監視機関（スプシ＋dokuho CSV由来・公式URL解決済み）は上書きしない。
+    is_new=1 の機関だけを追加する（公式URLは未解決＝名前・県・案件数のみ。
+    応募ガイドのポータル判定は名前マッチで動くため、まず名簿に載せることが重要）。
+    ※「［閉鎖］」印の機関は募集が無いので除外。
+    """
+    import os
+
+    if not os.path.exists(path):
+        return 0
+    db.init_db()
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        rows = [r for r in csv.DictReader(f)
+                if r.get("is_new") == "1" and not r["name"].startswith("［閉鎖］")]
+    existing = {a["name"] for a in db.list_agencies()}
+    fresh = [r for r in rows if r["name"] not in existing]
+    return db.upsert_agencies(fresh) if fresh else 0
+
+
 if __name__ == "__main__":
     n = load()
     n2 = load_extra()
-    print(f"監視対象の発注機関 {n} 件＋NJSS元機関リスト {n2} 件を取り込みました")
+    n3 = load_all_orgs()
+    print(f"監視対象の発注機関 {n} 件＋NJSS元機関リスト {n2} 件"
+          f"＋全機関棚卸し新規 {n3} 件を取り込みました")
