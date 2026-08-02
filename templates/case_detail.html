@@ -82,9 +82,9 @@
      書類作成の「元ネタ」は推測ではなく実在ファイルを直接読みに行く。 #}
   <section class="guide-box" id="assetsBox" data-case-id="{{ c.id }}">
     <h2>様式・資料ファイル（公告ページから自動収集）</h2>
-    <p class="pg-note muted small">発注機関が配布している様式（Word/Excel）や公告・仕様書PDFのリンクを、公告ページから直接探します。</p>
-    <button type="button" class="btn ghost small" id="assetsRun">様式・資料を探す</button>
-    <div id="assetsOut" hidden></div>
+    <p class="pg-note muted small">発注機関が配布している様式（Word/Excel）や公告・仕様書PDFのリンクを、公告ページから自動で探します（ページを開くと勝手に実行されます）。</p>
+    <div id="assetsOut"><p class="muted small">公告ページを読みに行っています…</p></div>
+    <button type="button" class="btn ghost small" id="assetsRun" hidden>もう一度探す</button>
   </section>
 
   {% if past_awards %}

@@ -477,7 +477,14 @@ def settings():
                 flash("パスワードを変更しました。" if done else msg,
                       "ok" if done else "error")
         return redirect(url_for("auth.settings"))
-    return render_template("auth/settings.html", provider=provider)
+    # AI利用カウンター（今月・自分の分。gemini-2.5-flash単価×150円/$の概算）
+    usage = None
+    if u and _pg():
+        import supa
+        usage = supa.usage_for(u.get("email", ""))
+        usage["cost_yen"] = round(
+            (usage["tokens_in"] / 1e6 * 0.30 + usage["tokens_out"] / 1e6 * 2.50) * 150, 1)
+    return render_template("auth/settings.html", provider=provider, usage=usage)
 
 
 @auth_bp.route("/admin/users", methods=["GET", "POST"])
@@ -496,8 +503,9 @@ def admin_users():
         return redirect(url_for("auth.admin_users"))
     if _pg():
         import supa
-        return render_template("auth/admin_users.html", users=supa.list_users())
-    return render_template("auth/admin_users.html", users=list_users())
+        return render_template("auth/admin_users.html", users=supa.list_users(),
+                               usage=supa.usage_summary())
+    return render_template("auth/admin_users.html", users=list_users(), usage=None)
 
 
 # ---- CLI -------------------------------------------------------------------

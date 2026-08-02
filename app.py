@@ -413,6 +413,18 @@ def case_detail(case_id: int):
     )
 
 
+def _log_ai_usage(kind: str, result: dict) -> None:
+    """AI生成1回を課金カウンターへ記録（キャッシュヒット・失敗は記録しない）。"""
+    try:
+        import supa
+        if result.get("enabled") and not result.get("error"):
+            u = result.get("usage") or {}
+            supa.log_ai_usage(auth.current_email(), kind, result.get("model", ""),
+                              u.get("in", 0), u.get("out", 0))
+    except Exception:  # noqa: BLE001 — 記録失敗で本体機能を止めない
+        logging.getLogger(__name__).warning("ai usage log failed", exc_info=True)
+
+
 @app.route("/case/<int:case_id>/ai-assist", methods=["POST"])
 def case_ai_assist(case_id: int):
     """【課金プラン・オンデマンド】AI応募アシストを生成して返す（タップ時のみ課金）。
@@ -456,6 +468,7 @@ def case_ai_assist(case_id: int):
     if result.get("enabled") and ext:
         db.set_ai_assist(ext, json.dumps(result, ensure_ascii=False),
                          result.get("model", ""), user=auth.current_email())
+    _log_ai_usage("assist", result)
     result["cached"] = False
     return jsonify(result)
 
@@ -510,6 +523,7 @@ def case_doc_draft(case_id: int):
     if result.get("enabled") and not result.get("error") and ext:
         db.set_ai_assist(key, json.dumps(result, ensure_ascii=False),
                          result.get("model", ""), user=auth.current_email())
+    _log_ai_usage("doc", result)
     result["cached"] = False
     return jsonify(result)
 
@@ -539,8 +553,12 @@ def case_notice_assets(case_id: int):
     result = {"ok": True, "links": page.get("links") or [],
               "source_url": url,
               "note": ("" if page.get("links")
-                       else "公告ページから配布ファイルを検出できませんでした。"
-                            "公告リンク先で直接確認してください。")}
+                       else "この案件の公告ページには配布ファイルの直接リンクが"
+                            "載っていませんでした（元データがポータルの案内ページの"
+                            "場合はここでは取れません）。公告原本は上の"
+                            "「公告を開く／ウェブで探す」から確認してください。"
+                            "書類の下書き自体は、入札準備プランの各書類の"
+                            "「この書類を作る」でAIが作成できます。")}
     if ext:
         db.set_ai_assist(key, json.dumps(result, ensure_ascii=False), user="")
     result["cached"] = False
@@ -612,6 +630,7 @@ def case_bid_plan(case_id: int):
         db.set_ai_assist(_PLAN_CACHE_PREFIX + ext,
                          json.dumps(result, ensure_ascii=False),
                          result.get("model", ""), user=auth.current_email())
+    _log_ai_usage("plan", result)
     result["cached"] = False
     result["price_guide"] = guide
     result["budget_yen"] = case.get("budget_yen") or 0

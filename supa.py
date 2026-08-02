@@ -29,6 +29,7 @@ _TIMEOUT = 5  # 保存時に長くブロックしないよう短め（不通で�
 
 _KV_TABLE = "dln_kv"
 _USERS_TABLE = "dln_users"
+_USAGE_TABLE = "dln_ai_usage"
 
 
 def _url() -> str:
@@ -63,6 +64,16 @@ def init() -> None:
                 " ai_enabled INTEGER DEFAULT 0,"
                 " is_admin INTEGER DEFAULT 0,"
                 " vertical TEXT DEFAULT '',"
+                " created_at TIMESTAMPTZ DEFAULT now())"
+            )
+            cur.execute(
+                f"CREATE TABLE IF NOT EXISTS {_USAGE_TABLE} ("
+                " id BIGSERIAL PRIMARY KEY,"
+                " email TEXT DEFAULT '',"
+                " kind TEXT DEFAULT '',"      # assist / plan / doc
+                " model TEXT DEFAULT '',"
+                " tokens_in INTEGER DEFAULT 0,"
+                " tokens_out INTEGER DEFAULT 0,"
                 " created_at TIMESTAMPTZ DEFAULT now())"
             )
             conn.commit()
@@ -221,6 +232,77 @@ def set_ai_enabled(email: str, enabled_flag: bool) -> bool:
     except Exception as e:  # noqa: BLE001
         log.warning("supa: set_ai_enabled failed: %s", e)
         return False
+
+
+# ============================================================
+# AI利用カウンター（課金の見える化。生成1回=1行。キャッシュヒットは記録しない）
+# ============================================================
+
+def log_ai_usage(email: str, kind: str, model: str,
+                 tokens_in: int = 0, tokens_out: int = 0) -> None:
+    """AI生成1回を記録する。失敗しても黙って続行（本体機能を止めない）。"""
+    if not enabled():
+        return
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO {_USAGE_TABLE} (email, kind, model, tokens_in, tokens_out) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                ((email or "").strip().lower(), kind[:16], model[:64],
+                 int(tokens_in or 0), int(tokens_out or 0)))
+            conn.commit()
+    except Exception as e:  # noqa: BLE001
+        log.warning("supa: log_ai_usage failed: %s", e)
+
+
+def usage_for(email: str) -> dict:
+    """1ユーザーの今月のAI利用（回数・トークン）。失敗時はゼロ。"""
+    out = {"count": 0, "tokens_in": 0, "tokens_out": 0}
+    if not enabled() or not email:
+        return out
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"SELECT COUNT(*), COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0) "
+                f"FROM {_USAGE_TABLE} WHERE email = %s "
+                "AND created_at >= date_trunc('month', now())",
+                ((email or "").strip().lower(),))
+            r = cur.fetchone()
+            out = {"count": r[0], "tokens_in": int(r[1]), "tokens_out": int(r[2])}
+    except Exception as e:  # noqa: BLE001
+        log.warning("supa: usage_for failed: %s", e)
+    return out
+
+
+def usage_summary() -> dict:
+    """管理者向けのAI利用集計（今月のユーザー別×機能別と全期間合計）。"""
+    out = {"month_by_user": [], "month_total": {"count": 0, "tokens_in": 0, "tokens_out": 0},
+           "all_total": {"count": 0, "tokens_in": 0, "tokens_out": 0}}
+    if not enabled():
+        return out
+    try:
+        with _connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"SELECT email, kind, COUNT(*), COALESCE(SUM(tokens_in),0), "
+                f"COALESCE(SUM(tokens_out),0) FROM {_USAGE_TABLE} "
+                "WHERE created_at >= date_trunc('month', now()) "
+                "GROUP BY email, kind ORDER BY email, kind")
+            out["month_by_user"] = [
+                {"email": r[0], "kind": r[1], "count": r[2],
+                 "tokens_in": int(r[3]), "tokens_out": int(r[4])}
+                for r in cur.fetchall()]
+            cur.execute(
+                f"SELECT COUNT(*), COALESCE(SUM(tokens_in),0), COALESCE(SUM(tokens_out),0), "
+                "COUNT(*) FILTER (WHERE created_at >= date_trunc('month', now())), "
+                "COALESCE(SUM(tokens_in) FILTER (WHERE created_at >= date_trunc('month', now())),0), "
+                "COALESCE(SUM(tokens_out) FILTER (WHERE created_at >= date_trunc('month', now())),0) "
+                f"FROM {_USAGE_TABLE}")
+            r = cur.fetchone()
+            out["all_total"] = {"count": r[0], "tokens_in": int(r[1]), "tokens_out": int(r[2])}
+            out["month_total"] = {"count": r[3], "tokens_in": int(r[4]), "tokens_out": int(r[5])}
+    except Exception as e:  # noqa: BLE001
+        log.warning("supa: usage_summary failed: %s", e)
+    return out
 
 
 def diagnose() -> dict:

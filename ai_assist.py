@@ -376,7 +376,14 @@ def _call_gemini(user_text: str, *, system: str | None = None,
         cand = (data.get("candidates") or [{}])[0]
         parts = (cand.get("content") or {}).get("parts") or [{}]
         text = parts[0].get("text", "{}")
-        return json.loads(text)
+        parsed = json.loads(text)
+        # 課金カウンター用: 消費トークンを応答に添える（呼び出し側が記録して除去）
+        if isinstance(parsed, dict):
+            um = data.get("usageMetadata") or {}
+            tin = int(um.get("promptTokenCount") or 0)
+            total = int(um.get("totalTokenCount") or 0)
+            parsed["_usage"] = {"in": tin, "out": max(0, total - tin)}
+        return parsed
 
     # flash運用の堅牢化: 応答JSONが稀に壊れる（途中切れ等）ため1回だけ再試行する。
     try:
@@ -404,6 +411,7 @@ def assist(case: dict, profile: dict | None = None,
     # タップ時に公告（PDF全文 or HTMLページ＋リンク先PDF）をコードで取得してAIに読ませる。
     notice_text, _links = _fetch_notice(case.get("detail_url", ""), case.get("title", ""))
     data = _call_gemini(_build_user_text(case, profile, requirements, notice_text))
+    data["usage"] = data.pop("_usage", None)  # 課金カウンター用（呼び出し側で記録）
     # 判定ポリシーを最終適用（登録情報なし→△固定、根拠なし✕→△。AI任せにしない）
     data["eligibility"] = apply_verdict_policy(
         data.get("eligibility"), profile_registered(profile))
@@ -596,8 +604,10 @@ def bid_plan(case: dict, profile: dict | None = None,
     text = _build_plan_text(case, profile, requirements, price_guide, notice_text,
                             past_awards=past_awards)
     try:
-        data = _normalize_plan(
-            _call_gemini(text, system=_PLAN_SYSTEM, schema=_PLAN_SCHEMA))
+        raw = _call_gemini(text, system=_PLAN_SYSTEM, schema=_PLAN_SCHEMA)
+        usage = raw.pop("_usage", None) if isinstance(raw, dict) else None
+        data = _normalize_plan(raw)
+        data["usage"] = usage  # 課金カウンター用（呼び出し側で記録）
     except ValueError as e:  # JSONDecodeError 含む＝応答が壊れている
         return {"enabled": True, "error": f"AI応答の解析に失敗しました: {e}"[:200]}
     data["enabled"] = True
@@ -724,6 +734,7 @@ def doc_draft(case: dict, doc_name: str, profile: dict | None = None,
         return {"enabled": True, "error": f"AI応答の解析に失敗しました: {e}"[:200]}
     if not isinstance(data, dict):
         return {"enabled": True, "error": "AI応答が想定外の形式でした"}
+    data["usage"] = data.pop("_usage", None)  # 課金カウンター用（呼び出し側で記録）
     data = _postfill_doc_fields(data, profile)
     # 様式らしき実在ファイルのリンクを添付（AIの推測ではなくコードで収集したもの）
     data["form_links"] = [l for l in links if l.get("kind") == "form"][:8]

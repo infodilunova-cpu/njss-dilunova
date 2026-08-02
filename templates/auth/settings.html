@@ -58,6 +58,20 @@
 </section>
 {% endif %}
 
+{% if usage %}
+<section class="pf-block">
+  <h2>AI利用状況（今月・このアカウント）</h2>
+  <p class="pf-hint">AI判定・準備プラン・書類下書きの生成回数です（キャッシュ再表示は課金されないため数えません）。</p>
+  <div class="pf-grid">
+    <div class="pf-fld"><span>生成回数</span>
+      <p class="settings-value">{{ usage.count }} 回</p></div>
+    <div class="pf-fld"><span>概算API料金</span>
+      <p class="settings-value">約 {{ usage.cost_yen }} 円
+        <span class="muted small">（gemini-2.5-flash 単価の概算）</span></p></div>
+  </div>
+</section>
+{% endif %}
+
 <section class="pf-block">
   <h2>会社・入札条件の設定</h2>
   <p class="pf-hint">自社情報・保有資格・等級・対応エリアは「マイ条件」で登録します
