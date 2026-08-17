@@ -16,10 +16,12 @@ API: http://www.kkj.go.jp/api/  （GET, XML, 認証不要）
 from __future__ import annotations
 
 import re
+import ssl
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from datetime import date as _date, timedelta as _timedelta
+from pathlib import Path
 
 import db
 from regions import region_of
@@ -27,6 +29,34 @@ from regions import region_of
 # https を使う（http はネットワークによってはタイムアウト/遅延しやすく、Renderの
 # ビルド時間（約15分上限）を圧迫してデプロイ失敗の原因になっていた）。
 API_URL = "https://www.kkj.go.jp/api/"
+
+# 【重要】kkj.go.jp は証明書チェーンの設定を誤っており、サーバ証明書の発行元
+# （JPRS DV RSA CA 2024 G1）とは別の中間CA（JPRS Domain Validation Authority - G4）を
+# 送ってくる。ブラウザやcurl(macOS)は不足分を自動で取りに行くので気づかないが、
+# Python(OpenSSL)はそれをしないため CERTIFICATE_VERIFY_FAILED で必ず失敗する。
+# 対策として正しい中間CAを certs/ に同梱し、検証は有効なまま接続する。
+# （検証を切る回避は絶対にしない＝中間者攻撃を許すため）
+_CA_BUNDLE = Path(__file__).with_name("certs") / "kkj_intermediate.pem"
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """標準の信頼ストア ＋ 同梱した中間CA で検証するコンテキストを作る。"""
+    ctx = ssl.create_default_context()
+    if _CA_BUNDLE.exists():
+        ctx.load_verify_locations(cafile=str(_CA_BUNDLE))
+    return ctx
+
+
+_SSL_CTX = _ssl_context()
+
+# 直近の取得失敗の理由。_fetch_retry が握り潰した例外をここに残し、呼び出し側
+# （update.py）が「0件だった本当の理由」をログに出せるようにする。
+_LAST_ERROR: str = ""
+
+
+def last_error() -> str:
+    """直近の取得で最後に発生した例外の要約（無ければ空文字）。"""
+    return _LAST_ERROR
 
 # 都道府県名 → JIS X0401 コード（LG_Code 用）。関西を厚くする時に使う。
 PREF_CODE = {
@@ -373,7 +403,7 @@ def fetch(query: str = "電気工事", category: str = "2",
         params["CFT_Issue_Date"] = issue_date
     url = API_URL + "?" + urllib.parse.urlencode(params, encoding="utf-8")
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as res:
+    with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as res:
         raw = res.read().decode("utf-8")
     root = ET.fromstring(raw)
     err = root.find("Error")
@@ -470,13 +500,17 @@ def _fetch_retry(query: str, category: str,
     """fetch() の薄いリトライ版。タイムアウト/DNS瞬断を retries 回まで再試行。
 
     1クエリの一過性失敗で取りこぼさないための保険。最終的に失敗したら [] を返す。
+    ただし**失敗理由は必ず記録する**（_LAST_ERROR）。ここで例外を黙って握り潰すと、
+    証明書エラー等による全滅が「取得0件」としか見えず、何週間も気付けない。
     """
     import time
+    global _LAST_ERROR
     for attempt in range(retries + 1):
         try:
             return fetch(query=query, category=category, lg_codes=lg_codes,
                          vertical=vertical, issue_date=issue_date)
-        except Exception:  # noqa: BLE001 — 一過性のネットワーク失敗を再試行
+        except Exception as e:  # noqa: BLE001 — 一過性のネットワーク失敗を再試行
+            _LAST_ERROR = f"{type(e).__name__}: {str(e)[:150]}"
             if attempt < retries:
                 time.sleep(2 * (attempt + 1))
                 continue

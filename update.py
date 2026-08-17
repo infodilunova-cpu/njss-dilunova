@@ -78,7 +78,11 @@ def run(reset: bool = False, koukai_instances: list[str] | None = None,
             print(f"[官公需API] 取得 {len(rows)} 件は既存 {existing} 件に対し過小"
                   f"（下限 {floor} 未満）。ネット障害等の疑いがあるため入替を中止し既存データを維持。")
         else:
+            # 0件は「公告が無い日」ではなく、ほぼ必ず取得側の障害（証明書・DNS・API仕様変更）。
+            # 理由を必ず出す（この一行だけだと全滅に何週間も気付けない）。
+            why = kkj_scraper.last_error() or "原因不明（例外なし・レスポンスが空）"
             print("[官公需API] 取得0件のため既存データを維持（差し替えなし）")
+            print(f"[警告] 官公需APIが1件も返していません。最後のエラー: {why}")
     except Exception as e:  # noqa: BLE001
         print(f"[官公需API] 失敗・既存データ維持: {str(e)[:70]}")
 
@@ -170,8 +174,12 @@ def run(reset: bool = False, koukai_instances: list[str] | None = None,
         # 【安全弁】案件が極端に少ない＝官公需APIが落ちていた等で生成失敗。
         # この状態でデプロイすると「空っぽのサイト」が公開されてしまうため、
         # 非0終了でビルドを止める→Renderは直前の正常デプロイを維持する。
-        if n_cases < FAST_MIN_CASES:
-            print(f"[安全弁] 案件 {n_cases} 件は下限 {FAST_MIN_CASES} 未満。"
+        # 網羅モード(--full)は本来数万件入る。ここを fast と同じ 500 で判定すると、
+        # 官公需APIが全滅して痩せたDBでも「正常」として公開されてしまう（実際に
+        # 姉妹アプリで発生）。閾値をモード別にする。
+        floor_cases = FULL_MIN_CASES if full else FAST_MIN_CASES
+        if n_cases < floor_cases:
+            print(f"[安全弁] 案件 {n_cases} 件は下限 {floor_cases} 件（{mode}）未満。"
                   "データ生成に失敗とみなしビルドを中止（前回の正常デプロイを維持）。")
             sys.exit(1)
         return
