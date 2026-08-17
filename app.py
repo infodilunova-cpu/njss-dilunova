@@ -136,7 +136,8 @@ auth.init_auth_db()
 app.register_blueprint(auth.auth_bp)
 
 # ログイン必須ガード（auth系・healthz・staticは除外）。未ログインはログインへ誘導。
-_PUBLIC_ENDPOINTS = {"auth.login", "auth.signup", "static", "healthz"}
+# api_data_health は外形監視（機械）が叩くため認証不要。集計値しか返さない。
+_PUBLIC_ENDPOINTS = {"auth.login", "auth.signup", "static", "healthz", "api_data_health"}
 
 
 @app.before_request
@@ -187,43 +188,61 @@ def inject_profile_set():
         return {"profile_set": False}
 
 
-# データ異常とみなす閾値
-_HEALTH_MIN_CASES = 1000   # これ未満は取得失敗の疑い（通常は1万件超）
-_HEALTH_STALE_DAYS = 5     # 最新公告がこれ以上前なら更新停止の疑い
+def _data_health() -> dict:
+    """データの鮮度・件数・検品結果を1つの dict にまとめる。
+
+    判定基準は data_expectations.py に集約してある（update.py の安全弁・毎日の監査・
+    外形監視と**同じ期待値**を使う）。ここだけ独自のしきい値を持つと「ビルドは通ったのに
+    画面には警告が出る／その逆」というズレが起きるため、絶対に基準を分岐させないこと。
+    読み取りのみで軽量。
+    """
+    import data_expectations as dx
+
+    info = {"total": 0, "latest": "", "stale": False, "stale_reason": "",
+            "sources": {}, "critical": 0}
+    try:
+        with db._connect() as conn:
+            counts = dx.source_counts(conn)
+            # 画面に出るのは常に --fast 基準（厳しい方で誤報を出さない）
+            findings = dx.inspect(conn, full=False)
+            info["latest"] = dx.latest_announced(conn)
+        info["total"] = sum(counts.values())
+        info["sources"] = counts
+        info["critical"] = sum(1 for f in findings if f.critical)
+        if findings:
+            info["stale"] = True
+            info["stale_reason"] = "／".join(f.message for f in findings)
+    except Exception:  # noqa: BLE001 — ヘルス表示の失敗で画面を落とさない
+        pass
+    return info
 
 
 @app.context_processor
 def inject_data_health():
-    """データの鮮度・件数を全テンプレへ渡し、画面上部で警告できるようにする。
+    """データの鮮度・件数を全テンプレへ渡し、画面上部で警告できるようにする。"""
+    return {"data_health": _data_health()}
 
-    毎日の自動更新がネット障害等で失敗すると件数が激減したり更新が止まる。
-    今朝のような「無言の取得失敗」に運用者がすぐ気づけるよう、件数と最新公告日を
-    評価して `data_health.stale`（要注意か）と理由を返す。読み取りのみで軽量。
+
+@app.route("/api/data-health")
+def api_data_health():
+    """データの健全性をJSONで返す（外形監視用・DBの読み取りだけ）。
+
+    GitHub Actions の watchdog がこれを外から叩き、異常なら**ワークフローを赤くする**。
+    画面のバナーは人が見に来ないと気づけないため、機械が毎日見る口を用意する。
+    HTTPステータスも変える（正常200／重大503）ので、curl だけでも監視できる。
+    返すのは件数などの集計値だけで、案件の中身や個人情報は含めない。
     """
-    info = {"total": 0, "latest": "", "stale": False, "stale_reason": ""}
-    try:
-        with db._connect() as conn:
-            total = conn.execute("SELECT COUNT(*) FROM cases").fetchone()[0] or 0
-            latest = conn.execute(
-                "SELECT MAX(announced_date) FROM cases WHERE announced_date != ''"
-            ).fetchone()[0] or ""
-        info["total"], info["latest"] = total, latest
-        reasons = []
-        if total < _HEALTH_MIN_CASES:
-            reasons.append(f"案件が{total:,}件と異常に少なく、データ取得に失敗している可能性があります")
-        if latest:
-            try:
-                d = date.fromisoformat(latest)
-                if (date.today() - d).days >= _HEALTH_STALE_DAYS:
-                    reasons.append(f"最新の公告が{latest}で、データ更新が止まっている可能性があります")
-            except ValueError:
-                pass
-        if reasons:
-            info["stale"] = True
-            info["stale_reason"] = "／".join(reasons)
-    except Exception:  # noqa: BLE001 — ヘルス表示の失敗で画面を落とさない
-        pass
-    return {"data_health": info}
+    h = _data_health()
+    body = {
+        "ok": not h["stale"],
+        "total": h["total"],
+        "latest_announced": h["latest"],
+        "critical": h["critical"],
+        "sources": h["sources"],
+        "reason": h["stale_reason"],
+        "checked_at": date.today().isoformat(),
+    }
+    return jsonify(body), (503 if h["critical"] else 200)
 
 
 @app.route("/healthz")

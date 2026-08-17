@@ -1,0 +1,75 @@
+name: 本番データの外形監視（毎日）
+
+# 【多層防御の一番外側】本番サイトを**外から**叩いて、データが生きているかを毎日見る。
+#
+# なぜ要るか: 2026-07-07から6週間、官公需APIの取得が証明書エラーで全滅していたのに、
+# 「データ網羅更新」ワークフローは毎日 success で終わり続けた。取得が0件でも最後まで
+# 走り切る構造だったため、GitHubのどこを見ても異常が分からなかった。
+# 画面には警告バナーが出ていたが、人が見に行かないと気づけない。
+# そこで「機械が毎日、本番の実物を見る」層を足す。ここが赤くなればGitHubからメールが届く。
+#
+# /api/data-health は重大な異常のとき HTTP 503 を返す（判定基準は data_expectations.py）。
+
+on:
+  schedule:
+    # JST 9:00（UTC 0:00）。網羅更新（JST 6:00）とRenderの再デプロイが終わった後に見る。
+    - cron: "0 0 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 本番のデータ健全性を確認
+        run: |
+          URL="https://njss-dilunova.onrender.com/api/data-health"
+          # Render無料プランはスリープするので、起こしてから最大3回試す
+          for i in 1 2 3; do
+            CODE=$(curl -s -o body.json -w "%{http_code}" --max-time 120 "$URL" || echo "000")
+            [ "$CODE" != "000" ] && break
+            echo "応答なし（$i回目）。スリープ復帰を待って再試行します。"
+            sleep 30
+          done
+
+          echo "HTTP $CODE"
+
+          # 応答の中身を人が読める形にする。JSONでない（404のHTML等）ときも
+          # 例外を吐かせない＝監視自身のノイズで本当の異常を見えなくしない。
+          python3 - "$CODE" <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, sys
+          code = sys.argv[1]
+          print("### 本番データの健全性\n")
+          print(f"- HTTP: `{code}`")
+          try:
+              d = json.load(open("body.json"))
+          except Exception:
+              print("- 応答がJSONではありません（下の判定を参照）")
+          else:
+              print(f"- 総件数: {d.get('total', 0):,} 件")
+              print(f"- 最新公告: {d.get('latest_announced') or '不明'}")
+              for k, v in sorted(d.get("sources", {}).items(), key=lambda kv: -kv[1]):
+                  print(f"  - {k}: {v:,} 件")
+              if d.get("reason"):
+                  print(f"- 指摘: {d['reason']}")
+          PY
+
+          case "$CODE" in
+            200)
+              echo "本番データは正常です。"
+              exit 0 ;;
+            503)
+              echo "::error::本番データに重大な異常があります。取得が壊れている可能性が高いので、\
+          データ網羅更新ワークフローのログと本番画面を確認してください。"
+              exit 1 ;;
+            404)
+              echo "::error::/api/data-health がありません。本番のデプロイが古い（この監視より前の\
+          コードが動いている）可能性があります。Renderの最新デプロイを確認してください。"
+              exit 1 ;;
+            000)
+              echo "::error::本番サイトに接続できません（3回試行）。Renderが落ちている可能性があります。"
+              exit 1 ;;
+            *)
+              echo "::error::想定外の応答です（HTTP $CODE）。本番画面を確認してください。"
+              exit 1 ;;
+          esac

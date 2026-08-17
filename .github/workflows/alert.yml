@@ -1,0 +1,72 @@
+name: 障害をIssueで通知
+
+# 【多層防御・人に届く層】ワークフローが赤くなってもGitHubのメールは埋もれやすい。
+# 失敗したら **Issueを立てて残す**。Issueは消えないので「気づかないまま何週間も」を防ぐ。
+# 同じ障害で毎日Issueが増えないよう、未クローズの同種Issueがあればコメントを足すだけにする。
+# 復旧したら自動でクローズする。
+#
+# 追加のシークレット不要（GitHub備え付けのトークンだけで動く）＝設定漏れで機能しない層にならない。
+
+on:
+  workflow_run:
+    workflows: ["データ網羅更新（毎日）", "本番データの外形監視（毎日）"]
+    types: [completed]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 結果に応じてIssueを起票・更新・クローズ
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          WF: ${{ github.event.workflow_run.name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          TITLE="[自動] ${WF} が失敗しています"
+          # 同じ表題の未クローズIssueを探す（無ければ空）
+          NUM=$(gh issue list --repo "$REPO" --state open --search "\"$TITLE\" in:title" \
+                  --json number --jq '.[0].number // empty')
+
+          if [ "$CONCLUSION" = "success" ]; then
+            if [ -n "$NUM" ]; then
+              gh issue comment "$NUM" --repo "$REPO" \
+                --body "復旧を確認しました（$RUN_URL）。このIssueを閉じます。"
+              gh issue close "$NUM" --repo "$REPO"
+              echo "復旧したのでIssue #$NUM を閉じました。"
+            else
+              echo "正常終了。起票なし。"
+            fi
+            exit 0
+          fi
+
+          BODY=$(cat <<EOF
+          **${WF}** が \`${CONCLUSION}\` で終わりました。
+
+          - 実行ログ: ${RUN_URL}
+
+          ### 最初に見るところ
+          1. ログの \`[事前確認]\` — 取得元に繋がっているか（証明書・DNS・API仕様変更）
+          2. ログの \`検品:\` — 取得元別に何件入ったか。0件のソースがあればそこが原因
+          3. 本番の <https://njss-dilunova.onrender.com/api/data-health> — 実際のデータ状態
+
+          判定基準は \`data_expectations.py\` にまとまっています。
+          しきい値が実態に合っていないだけなら、そこの EXPECT を根拠つきで直してください。
+
+          ※このIssueは自動作成です。復旧すると自動で閉じます。
+          EOF
+          )
+
+          if [ -n "$NUM" ]; then
+            gh issue comment "$NUM" --repo "$REPO" --body "まだ失敗しています（$RUN_URL）"
+            echo "既存Issue #$NUM にコメントしました。"
+          else
+            gh issue create --repo "$REPO" --title "$TITLE" --body "$BODY"
+            echo "Issueを起票しました。"
+          fi

@@ -30,12 +30,30 @@ jobs:
         run: pip install playwright && python -m playwright install --with-deps chromium
 
       - name: 回帰テスト（壊れていたら中止）
-        run: python test_procurement.py && python test_kkj.py && python test_tokyo.py && python test_awards.py && python test_dedupe.py && python test_ai_policy.py && python test_multitenant.py
+        run: python test_procurement.py && python test_kkj.py && python test_tokyo.py && python test_awards.py && python test_dedupe.py && python test_ai_policy.py && python test_multitenant.py && python test_data_expectations.py
+
+      # 【多層防御・第1層】数時間かかる重い取得を始める前に、外部ソースへ実接続して確かめる。
+      # 証明書・DNS・API仕様変更で取れないなら、ここで即座に赤くして中止する。
+      # 2026-08-09の事故では、取れないまま最後まで走り切り、しかも既存データが
+      # 残るので総件数は正常に見え、8日間気づけなかった。
+      - name: 事前確認（取得元に本当に繋がるか）
+        run: python preflight.py
 
       - name: 網羅DB生成（全国・都道府県分割＋自治体個別システム）
         env:
           PLAYWRIGHT_SOURCES: "1"   # 京都/愛知/PPUBC/茨城/PPI(落札者つき)を有効化
-        run: python update.py --full
+        run: |
+          set -o pipefail
+          python update.py --full 2>&1 | tee build.log
+          # 【多層防御・第2層】検品結果をActionsのサマリに残す。「成功」の一言ではなく
+          # 取得元別に何件入ったかを毎回見えるようにする（痩せていく変化に気づけるように）。
+          {
+            echo "### 生成したデータ"
+            echo ""
+            echo '```'
+            grep -E "^\[|^===|^  - |^検品" build.log || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: PDF実照合でToDo精度を監査（PDCA・非ブロッキング）
         run: |
@@ -43,6 +61,22 @@ jobs:
           # 生成したToDo/必要書類が公告PDFの実態とズレていないかをサンプル照合。
           # 失敗や低スコアでもデプロイは止めない（品質の可視化が目的）。ログで確認できる。
           python audit.py --pdf 40 || echo "::warning::PDF実照合の整合率がしきい値未満、またはPDF監査に失敗（ログ参照）"
+
+      # data_baseline.json =「前回正常だったときの取得元別件数」。次回これと比べて
+      # 「下限は超えているのに半減している」静かな劣化を検知する。毎回チェックアウトし直す
+      # ため、リポジトリへ持ち帰らないとこの層が一生働かない。
+      - name: 検品の基準値を持ち帰る
+        run: |
+          if [ -f data_baseline.json ] && ! git diff --quiet -- data_baseline.json; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add data_baseline.json
+            git commit -m "chore: 検品の基準値を更新 $(date -u +%Y-%m-%d)"
+            git pull --rebase origin main && git push
+            echo "基準値を更新しました。"
+          else
+            echo "基準値に変化なし（または正常でなかったため未更新）。"
+          fi
 
       - name: DBを圧縮
         run: gzip -9 -c denki_bid.db > denki_bid.db.gz && ls -lh denki_bid.db.gz

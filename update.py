@@ -171,17 +171,23 @@ def run(reset: bool = False, koukai_instances: list[str] | None = None,
         n_cases = db.count_cases()
         mode = "網羅更新" if full else "高速更新"
         print(f"=== {mode}完了: 案件 {n_cases} 件 / 監視機関 {db.count_agencies()} 機関 ===")
-        # 【安全弁】案件が極端に少ない＝官公需APIが落ちていた等で生成失敗。
-        # この状態でデプロイすると「空っぽのサイト」が公開されてしまうため、
-        # 非0終了でビルドを止める→Renderは直前の正常デプロイを維持する。
-        # 網羅モード(--full)は本来数万件入る。ここを fast と同じ 500 で判定すると、
-        # 官公需APIが全滅して痩せたDBでも「正常」として公開されてしまう（実際に
-        # 姉妹アプリで発生）。閾値をモード別にする。
-        floor_cases = FULL_MIN_CASES if full else FAST_MIN_CASES
-        if n_cases < floor_cases:
-            print(f"[安全弁] 案件 {n_cases} 件は下限 {floor_cases} 件（{mode}）未満。"
-                  "データ生成に失敗とみなしビルドを中止（前回の正常デプロイを維持）。")
+        # 【安全弁＝成果物の検品】「エラーが出なかった」ではなく「入るべきものが
+        # 入っているか」を機械で見る。期待仕様は data_expectations.py に集約（多層で共用）。
+        # 総件数だけの判定では今回の障害は検知できなかった（官公需APIが0件でも
+        # 既存データで125,276件残っていたため）。取得元別と鮮度で見る。
+        import data_expectations as dx
+        with db._connect() as conn:
+            counts = dx.source_counts(conn)
+            findings = dx.inspect(conn, full=full)
+            print(dx.format_report(findings, counts=counts))
+        if any(f.critical for f in findings):
+            print("[安全弁] 重大な指摘があるためビルドを中止（前回の正常デプロイを維持）。")
             sys.exit(1)
+        # 指摘なしのときだけ基準値を更新する。異常な値を基準にすると、毎日少しずつ
+        # 下がっても「前回と同じくらい」で通ってしまい、静かに痩せていくため。
+        if not findings:
+            dx.save_baseline("full" if full else "fast", counts)
+            print(f"[基準値] 正常だったので {dx.BASELINE_PATH.name} を更新しました。")
         return
 
     # 1) 自治体の電気工事（実データ・個別システム）— 京都府・愛知県・堺市(大阪府)

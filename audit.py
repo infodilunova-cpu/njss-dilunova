@@ -154,10 +154,18 @@ def run(quiet: bool = False, pdf_sample: int = 0) -> int:
 
     pdf_sample>0 なら、ToDo精度をサンプル件数だけ公告PDFと実照合する（PDCA）。
     """
+    import data_expectations as dx
+
     stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     with _conn() as c:
         metrics, warns = quality_audit(c)
         opps = opportunity_audit(c)
+        # 【多層防御】update.py の安全弁・画面バナーと**同じ期待値**で検品する。
+        # 総件数だけ見ていると「主力ソースが死んで、古い案件で件数が埋まっている」
+        # という一番わかりにくい壊れ方を見逃す（2026-08-09の事故がまさにそれ）。
+        src_counts = dx.source_counts(c)
+        findings = dx.inspect(c, full=False)
+    warns += [str(f) for f in findings]
 
     pdf_rep = pdf_audit(pdf_sample) if pdf_sample > 0 else None
     if pdf_rep and pdf_rep["checked"] and pdf_rep["accuracy"] < PDF_AUDIT_MIN_ACCURACY:
@@ -176,6 +184,8 @@ def run(quiet: bool = False, pdf_sample: int = 0) -> int:
     md.append(f"- 最新公告日: {metrics['latest_announced']}")
     md.append(f"- 締切あり: {metrics['with_deadline']}（{metrics['deadline_rate']}%）")
     md.append(f"- 予定価格あり: {metrics['with_price']}（{metrics['price_rate']}%）")
+    md.append("- 取得元別: " + " / ".join(
+        f"{k} {v:,}" for k, v in sorted(src_counts.items(), key=lambda kv: -kv[1])))
     md.append("- 状態: " + ("正常" if not warns else "要確認"))
     for w in warns:
         md.append(f" - {w}")
