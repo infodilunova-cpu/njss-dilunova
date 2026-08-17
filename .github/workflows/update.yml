@@ -67,16 +67,22 @@ jobs:
       # ため、リポジトリへ持ち帰らないとこの層が一生働かない。
       - name: 検品の基準値を持ち帰る
         run: |
-          if [ -f data_baseline.json ] && ! git diff --quiet -- data_baseline.json; then
-            git config user.name  "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add data_baseline.json
-            git commit -m "chore: 検品の基準値を更新 $(date -u +%Y-%m-%d)"
-            git pull --rebase origin main && git push
-            echo "基準値を更新しました。"
-          else
-            echo "基準値に変化なし（または正常でなかったため未更新）。"
+          if [ ! -f data_baseline.json ]; then
+            echo "基準値ファイルなし（検品で指摘が出た回は更新しない仕様）。"
+            exit 0
           fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # 【注意】初回は未追跡ファイルなので git diff では差分ゼロに見える。
+          # add してから --cached で比べないと、初回の基準値が永久にコミットされない。
+          git add -- data_baseline.json
+          if git diff --cached --quiet -- data_baseline.json; then
+            echo "基準値に変化なし。"
+            exit 0
+          fi
+          git commit -m "chore: 検品の基準値を更新 $(date -u +%Y-%m-%d)"
+          git pull --rebase origin main && git push
+          echo "基準値を更新しました。"
 
       - name: DBを圧縮
         run: gzip -9 -c denki_bid.db > denki_bid.db.gz && ls -lh denki_bid.db.gz
