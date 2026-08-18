@@ -23,6 +23,9 @@ _KV = {}
 supa.enabled = lambda: True
 supa.save = lambda k, v: (_KV.__setitem__(k, v), True)[1]
 supa.load = lambda k: _KV.get(k)
+# 多テナント復元は load_prefix を使う。スタブが無いと復元が例外で全滅し、
+# 「復元できていない＝書き戻さない」が働いてテストが成立しない。
+supa.load_prefix = lambda prefix: {k: v for k, v in _KV.items() if k.startswith(prefix)}
 _blocked = []
 supa.block_save = lambda reason: _blocked.append(reason)
 
@@ -90,6 +93,56 @@ check("急減する書き戻しは中止される（最後の砦）", len(_block
 check("中止の理由が記録される（利用者に知らせられる）",
       _blocked and "急減" in _blocked[0])
 check("Supabaseは上書きされていない", len(_KV.get("applications") or []) == 3)
+
+
+
+# ============================================================
+# 【不変条件】読み込めていないものを、書き戻さない
+# ============================================================
+# 復元が1キーでも失敗したら、そのキーは書き戻さない。
+# 書き戻すと「サーバにある正常な内容」を「手元の空っぽ」で上書きしてしまうため。
+# 以前は全キーを1つのtryで処理しており、途中で1回失敗すると以降が丸ごと未復元に
+# なり、利用者の1操作でマイ条件・監視機関の除外・NG集計・AI使用量が消える形だった。
+
+def _reset_state():
+    db._restore_state.clear()
+    db._unlinked_apps.clear()
+    db._supa_app_count.clear()
+
+
+print("\n-- 復元できていないキーを書き戻さないこと --")
+for key, push in [
+    ("applications", db._push_applications),
+    ("companies", db._push_companies),
+    ("profile", db._push_profile),
+    ("agency_exclusions", db._push_exclusions),
+]:
+    _reset_state()
+    _KV[db._kv_key(key, "")] = ["サーバにある大事な既存データ"]
+    db._restore_state[db._state_key(key, "")] = "failed"      # 起動時に読めなかった状態
+    _blocked.clear()
+    push()
+    check(f"{db._KEY_LABELS[key]}: 復元失敗時は書き戻さない",
+          _KV[db._kv_key(key, "")] == ["サーバにある大事な既存データ"] and len(_blocked) == 1)
+
+print("\n-- 復元できたキーは普通に書き戻せること（過保護で保存不能にしない） --")
+_reset_state()
+for key in db._KEY_LABELS:
+    db._restore_state[db._state_key(key, "")] = "loaded"
+_KV[db._kv_key("companies", "")] = ["old"]
+db.upsert_company({"name": "テスト協力", "sector": "公共"})
+check("復元できていれば協力会社は保存される",
+      isinstance(_KV.get(db._kv_key("companies", "")), list) and any(
+          (c.get("name") == "テスト協力") for c in _KV[db._kv_key("companies", "")] if isinstance(c, dict)))
+
+print("\n-- 1つの失敗が他のキーを巻き添えにしないこと --")
+_reset_state()
+def _boom():
+    raise RuntimeError("読み込み失敗を再現")
+db._restore_section("companies", "", _boom)
+db._restore_section("profile", "", lambda: (db._mark_restored("profile", "", True), 1)[1])
+check("失敗したキーだけ failed になる", db._restore_state.get(db._state_key("companies", "")) == "failed")
+check("後続のキーは巻き添えにならない", db._restore_state.get(db._state_key("profile", "")) == "loaded")
 
 print(f"\n{_ok}/{_ok+_ng} passed")
 sys.exit(1 if _ng else 0)

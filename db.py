@@ -46,6 +46,72 @@ _unlinked_apps: dict[str, list[dict[str, Any]]] = {}
 # ユーザーごとの「Supabaseに入っている申請の件数」。急減する書き戻しの検知に使う。
 _supa_app_count: dict[str, int] = {}
 
+# ============================================================
+# 【不変条件】読み込めていないものを、書き戻さない
+# ============================================================
+# Supabase が真の保存先で、SQLite は毎デプロイで作り直される。
+# 各 _push_*() は「今SQLiteにある全件」で丸ごと上書きするため、
+# **起動時の復元に失敗したキーをそのまま書き戻すと、保存済みの内容が消える。**
+# 復元は全キーを1つの try でまとめて処理していたため、途中で1回失敗すると
+# それ以降が丸ごと未復元になり、利用者の1操作で永久に失われる形だった。
+#
+#   loaded … サーバから読めて反映できた   → 書き戻してよい
+#   empty  … サーバに元々何も無かった     → 書き戻してよい（失うものが無い）
+#   failed … 読めなかった／反映に失敗した → **書き戻さない**
+# 判断に迷ったら書かない（消えるより残るほうが良い）。
+# 多テナントなので "種類:ユーザー" 単位で持つ。
+_restore_state: dict[str, str] = {}
+
+# 起動時の復元処理が最後まで走り切ったか。
+# 走り切ったのに記録が無いキー＝**サーバに元々何も無い**ということなので、
+# 書き戻してよい（失うものが無い）。ここを区別しないと、新規導入時に
+# 一度も保存できないアプリになる（実際に作りかけて気づいた）。
+_restore_done: bool = False
+
+_KEY_LABELS = {
+    "applications": "申請管理",
+    "companies": "協力会社",
+    "profile": "マイ条件",
+    "agency_exclusions": "監視機関の除外設定",
+}
+
+
+def _state_key(kind: str, user: str) -> str:
+    return f"{kind}:{_u(user)}"
+
+
+def _may_push(kind: str, user: str = "") -> bool:
+    """このキーを書き戻してよいか。復元できていないものは書かせない。"""
+    if not supa.enabled():
+        return False
+    st = _restore_state.get(_state_key(kind, user))
+    if st in ("loaded", "empty"):
+        return True
+    if st is None and _restore_done:
+        # 復元は正常に終わっていて、このキーの記録が無い＝サーバに何も無い。
+        return True
+    supa.block_save(
+        f"「{_KEY_LABELS.get(kind, kind)}」の保存を見送りました。"
+        "起動時にサーバから読み込めていないため、いま保存すると"
+        "保存済みの内容を消してしまいます。時間をおいて画面を再読み込みしてください。")
+    return False
+
+
+def _mark_restored(kind: str, user: str, loaded: bool) -> None:
+    _restore_state[_state_key(kind, user)] = "loaded" if loaded else "empty"
+
+
+def _restore_section(kind: str, user: str, fn) -> int:
+    """復元を1キー分だけ実行する。**1つ失敗しても他を巻き添えにしない。**"""
+    try:
+        return fn()
+    except Exception as e:  # noqa: BLE001
+        _restore_state[_state_key(kind, user)] = "failed"
+        import logging
+        logging.getLogger(__name__).warning(
+            "supa restore %s(%s) failed: %s", kind, user or "(共有)", e)
+        return 0
+
 # 仕様書の取得可否ステータス（取れる/取れない/不明）
 SPEC_AVAILABLE = "available"      # ダウンロード可能
 SPEC_UNAVAILABLE = "unavailable"  # 取得不可（理由は spec_reason）
@@ -1077,7 +1143,7 @@ def _push_applications(user: str = "") -> None:
       1. 復元できなかった申請(_unlinked_apps)を必ず混ぜる ＝ そもそも減らさない
       2. それでも大幅に減るときは書き戻しを中止して警告 ＝ 最後の砦
     """
-    if _restoring:
+    if _restoring or not _may_push("applications", user):
         return
     key = _u(user)
     rows = _applications_for_supa(user)
@@ -1100,13 +1166,13 @@ def _push_applications(user: str = "") -> None:
 
 
 def _push_companies(user: str = "") -> None:
-    if _restoring:
+    if _restoring or not _may_push("companies", user):
         return
     supa.save(_kv_key("companies", user), list_companies(user))
 
 
 def _push_profile(user: str = "") -> None:
-    if _restoring:
+    if _restoring or not _may_push("profile", user):
         return
     with _connect() as conn:
         row = conn.execute("SELECT * FROM profiles WHERE user_email = ?",
@@ -1118,7 +1184,7 @@ def _push_profile(user: str = "") -> None:
 
 
 def _push_exclusions(user: str = "") -> None:
-    if _restoring:
+    if _restoring or not _may_push("agency_exclusions", user):
         return
     supa.save(_kv_key("agency_exclusions", user), sorted(list_agency_exclusions(user)))
 
@@ -1180,7 +1246,7 @@ def restore_from_supa() -> dict[str, int]:
     キーは「kind:メールアドレス」（旧来の共有データは接尾辞なしの「kind」）。
     すべて失敗しても例外は投げない（アプリは動き続ける）。
     """
-    global _restoring
+    global _restoring, _restore_done
     if not supa.enabled():
         return {}
     counts = {"applications": 0, "companies": 0, "profile": 0, "exclusions": 0}
@@ -1197,6 +1263,7 @@ def restore_from_supa() -> dict[str, int]:
 
     try:
         for user, apps in _kind_items("applications"):
+            _mark_restored("applications", user, isinstance(apps, list) and bool(apps))
             # 【復旧の保険】読み込めた「正常な状態」を、何かに上書きされる前に
             # 日付つきで控える。起動ごとに1回だけなので負荷は無視できる。
             # 控えの取得に失敗しても復元は必ず続ける（保険の失敗で本体を止めない）。
@@ -1207,25 +1274,43 @@ def restore_from_supa() -> dict[str, int]:
                     supa.save(_kv_key(f"applications_bak_{_dt.date.today():%Y%m%d}", user), apps)
                 except Exception:  # noqa: BLE001
                     pass
-            counts["applications"] += _restore_applications(user, apps)
+            counts["applications"] += _restore_section(
+                "applications", user, lambda u=user, a=apps: _restore_applications(u, a))
         # 協力会社（ユーザーごとに全消し→投入）。空/欠損は消さない（全消し事故防止）。
         for user, comps in _kind_items("companies"):
-            if isinstance(comps, list) and comps:
+            def _r_comp(u=user, cs=comps) -> int:
+                if not isinstance(cs, list) or not cs:
+                    _mark_restored("companies", u, False)
+                    return 0
                 with _connect() as conn:
-                    conn.execute("DELETE FROM companies WHERE user_email = ?", (_u(user),))
+                    conn.execute("DELETE FROM companies WHERE user_email = ?", (_u(u),))
                     conn.commit()
-                for c in comps:
+                n = 0
+                for c in cs:
                     c.pop("id", None)
-                    upsert_company(c, user=user)
-                    counts["companies"] += 1
+                    upsert_company(c, user=u)
+                    n += 1
+                _mark_restored("companies", u, True)
+                return n
+            counts["companies"] += _restore_section("companies", user, _r_comp)
         for user, prof in _kind_items("profile"):
-            counts["profile"] += _restore_profile(user, prof)
+            def _r_prof(u=user, pr=prof) -> int:
+                n = _restore_profile(u, pr)
+                _mark_restored("profile", u, bool(n))
+                return n
+            counts["profile"] += _restore_section("profile", user, _r_prof)
         # 監視機関の除外。空/欠損のときは置換しない（既存を消さない）。
         for user, exc in _kind_items("agency_exclusions"):
-            if isinstance(exc, list) and exc:
-                replace_agency_exclusions(exc, user=user)
-                counts["exclusions"] += len(exc)
+            def _r_exc(u=user, ex=exc) -> int:
+                if not isinstance(ex, list) or not ex:
+                    _mark_restored("agency_exclusions", u, False)
+                    return 0
+                replace_agency_exclusions(ex, user=u)
+                _mark_restored("agency_exclusions", u, True)
+                return len(ex)
+            counts["exclusions"] += _restore_section("agency_exclusions", user, _r_exc)
         counts["doc_states"] = _restore_doc_states()
+        _restore_done = True   # ここまで来たら「サーバを一通り見た」と言える
     except Exception as e:  # noqa: BLE001 — 復元失敗でアプリを落とさない
         import logging
         logging.getLogger(__name__).warning("supa restore failed: %s", e)
