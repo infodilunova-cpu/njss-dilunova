@@ -223,6 +223,22 @@ def inject_data_health():
     return {"data_health": _data_health()}
 
 
+@app.context_processor
+def inject_save_health():
+    """永続化(Supabase)への直近の保存が失敗していたら警告を全テンプレへ渡す。
+
+    Render無料はディスク揮発のため、保存はSupabaseが本当の保管先。保存が無言で
+    失敗すると次のデプロイでその変更が消える。運用者・利用者が気づけるようバナーを出す。
+    """
+    try:
+        import supa  # このモジュールでは関数内importが慣例（先頭にimportが無い）
+        down = supa.enabled() and not supa.last_save_ok()
+        reason = supa.last_save_error() if down else ""
+    except Exception:  # noqa: BLE001
+        down, reason = False, ""
+    return {"save_alert": down, "save_alert_reason": reason}
+
+
 @app.route("/api/data-health")
 def api_data_health():
     """データの健全性をJSONで返す（外形監視用・DBの読み取りだけ）。

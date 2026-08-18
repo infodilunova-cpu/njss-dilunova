@@ -86,8 +86,25 @@ def init() -> None:
 # KV（ユーザー入力データの丸ごとJSON保存）
 # ============================================================
 
+# 直近の永続化保存が成功したか（--workers 1 前提でプロセス内共有）。
+# 無言の保存失敗＝次のデプロイでお客様の入力が消える、に運用者が気づけるようにする。
+_last_save_ok: bool = True
+_last_save_error: str = ""
+
+
+def last_save_ok() -> bool:
+    """直近の save() が成功していれば True（enabled 時のみ意味を持つ）。"""
+    return _last_save_ok
+
+
+def last_save_error() -> str:
+    """直近の保存失敗（またはブロック）の理由。"""
+    return _last_save_error
+
+
 def save(key: str, obj: Any) -> bool:
     """key にデータ(JSON可能な値)を丸ごと保存。成功で True。"""
+    global _last_save_ok, _last_save_error
     if not enabled():
         return False
     try:
@@ -99,8 +116,13 @@ def save(key: str, obj: Any) -> bool:
                 (key, Json(obj)),
             )
             conn.commit()
+        _last_save_ok = True
+        _last_save_error = ""
         return True
     except Exception as e:  # noqa: BLE001
+        # 無言の消失を防ぐため、失敗を記録して画面バナーで警告できるようにする。
+        _last_save_ok = False
+        _last_save_error = str(e)[:200]
         log.warning("supa: save %s failed: %s", key, e)
         return False
 
@@ -303,6 +325,17 @@ def usage_summary() -> dict:
     except Exception as e:  # noqa: BLE001
         log.warning("supa: usage_summary failed: %s", e)
     return out
+
+
+def block_save(reason: str) -> None:
+    """危険な書き戻しを「あえて行わなかった」ことを記録し、画面バナーで知らせる。
+
+    黙って止めると利用者は保存できたと思い込む。保存していないことを必ず伝える。
+    """
+    global _last_save_ok, _last_save_error
+    _last_save_ok = False
+    _last_save_error = reason
+    log.error("supa: save blocked: %s", reason)
 
 
 def diagnose() -> dict:

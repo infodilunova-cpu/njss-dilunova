@@ -34,6 +34,13 @@
   </aside>
 
   <main class="main">
+    {% if save_alert %}
+      <div class="flash error data-alert">
+        <strong>保存先に接続できていません</strong>：直近の変更がサーバに保存されていない可能性があります。
+        通信が回復してから、もう一度保存し直してください。
+        {% if save_alert_reason %}<br><span class="muted">{{ save_alert_reason }}</span>{% endif %}
+      </div>
+    {% endif %}
     {% if data_health and data_health.stale %}
       <div class="flash error data-alert">
         <strong>データに問題がある可能性があります</strong>：{{ data_health.stale_reason }}。

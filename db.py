@@ -28,6 +28,24 @@ DB_PATH = Path(__file__).parent / "denki_bid.db"
 # Supabaseからの復元中は write-through を止める（書き戻しの無限ループ防止）
 _restoring = False
 
+# 【重要・データ消失防止】Supabaseから読み込んだが、案件(cases)側に該当が無くて
+# SQLiteへ復元できなかった申請を、ユーザーごとに退避しておく場所。
+#
+# なぜ必要か（姉妹アプリ dgss で2026-08-17に判明した実在の消失経路）:
+#   Renderは毎デプロイでSQLiteが作り直され、起動時にSupabaseから申請を復元する。
+#   その際 external_id で今の案件IDに解決するが、**案件データ側が一時的に壊れて
+#   いると解決できず、従来はその申請を黙って捨てていた**。
+#   一方 _push_applications() は「今SQLiteにある全件」で丸ごと上書きするため、
+#   利用者が1件でも編集した瞬間に、捨てられた申請が**永久に失われる**。
+#   実際に2026-08-09〜17の取得障害でその一歩手前まで行った。
+#
+# 対策: 解決できなかった申請をここに保持し、書き戻すときに必ず混ぜる。
+# 案件が一時的に見つからないことは「お客様の入力を消してよい理由」にはならない。
+_unlinked_apps: dict[str, list[dict[str, Any]]] = {}
+
+# ユーザーごとの「Supabaseに入っている申請の件数」。急減する書き戻しの検知に使う。
+_supa_app_count: dict[str, int] = {}
+
 # 仕様書の取得可否ステータス（取れる/取れない/不明）
 SPEC_AVAILABLE = "available"      # ダウンロード可能
 SPEC_UNAVAILABLE = "unavailable"  # 取得不可（理由は spec_reason）
@@ -1052,9 +1070,33 @@ def _applications_for_supa(user: str = "") -> list[dict[str, Any]]:
 
 
 def _push_applications(user: str = "") -> None:
+    """申請をSupabaseへ書き戻す（Supabaseが真の保存先）。
+
+    【データ消失防止】丸ごと上書きなので、痩せた内容で走るとお客様の入力が
+    永久に消える。二重に守る:
+      1. 復元できなかった申請(_unlinked_apps)を必ず混ぜる ＝ そもそも減らさない
+      2. それでも大幅に減るときは書き戻しを中止して警告 ＝ 最後の砦
+    """
     if _restoring:
         return
-    supa.save(_kv_key("applications", user), _applications_for_supa(user))
+    key = _u(user)
+    rows = _applications_for_supa(user)
+
+    held = _unlinked_apps.get(key) or []
+    if held:
+        have = {r.get("external_id") for r in rows}
+        rows += [it for it in held if (it.get("external_id") or "") not in have]
+
+    prev = _supa_app_count.get(key)
+    if prev is not None and prev >= 10 and len(rows) < prev * 0.7:
+        supa.block_save(
+            f"申請の書き戻しを中止しました（{prev}件 → {len(rows)}件へ急減）。"
+            "案件データの不具合で復元しきれていない可能性があります。"
+            "この状態で保存するとお客様の入力が失われるため、あえて保存していません。")
+        return
+
+    if supa.save(_kv_key("applications", user), rows):
+        _supa_app_count[key] = len(rows)
 
 
 def _push_companies(user: str = "") -> None:
@@ -1092,6 +1134,9 @@ def _restore_applications(user: str, apps: Any) -> int:
             continue
         cid = get_case_id_by_external(ext)
         if cid is None:
+            # 【データ消失防止】案件が見つからないだけで、お客様の入力を捨てない。
+            # 退避しておき、Supabaseへ書き戻すときに必ず混ぜ戻す。
+            _unlinked_apps.setdefault(_u(user), []).append(it)
             continue
         fields = {k: it.get(k) for k in (
             "applied_date", "note", "assignee", "apply_deadline", "bid_deadline",
@@ -1152,6 +1197,16 @@ def restore_from_supa() -> dict[str, int]:
 
     try:
         for user, apps in _kind_items("applications"):
+            # 【復旧の保険】読み込めた「正常な状態」を、何かに上書きされる前に
+            # 日付つきで控える。起動ごとに1回だけなので負荷は無視できる。
+            # 控えの取得に失敗しても復元は必ず続ける（保険の失敗で本体を止めない）。
+            if isinstance(apps, list) and apps:
+                _supa_app_count[_u(user)] = len(apps)
+                try:
+                    import datetime as _dt
+                    supa.save(_kv_key(f"applications_bak_{_dt.date.today():%Y%m%d}", user), apps)
+                except Exception:  # noqa: BLE001
+                    pass
             counts["applications"] += _restore_applications(user, apps)
         # 協力会社（ユーザーごとに全消し→投入）。空/欠損は消さない（全消し事故防止）。
         for user, comps in _kind_items("companies"):
