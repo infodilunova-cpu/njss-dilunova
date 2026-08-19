@@ -225,6 +225,58 @@ def inspect(conn: sqlite3.Connection, *, full: bool = False) -> list[Finding]:
     return findings
 
 
+# ============================================================
+# 稼働まわりの期待仕様（データの中身ではなく「仕組みが生きているか」）
+# ============================================================
+# データが正しくても、①保存先が死んでいる ②日次更新が止まっている
+# ③画面がエラーを出し続けている なら、お客様の仕事は止まる。
+# 中身の検品と同じ場所に基準を置き、同じ経路（画面バナー／外形監視）で出す。
+
+# 日次更新が止まったとみなす日数。毎朝走るので2日空いたら異常。
+MAX_DEPLOY_STALE_DAYS = 2
+
+# 直近に記録された画面エラー（500）がこの件数を超えたら要注意。
+MAX_RECENT_ERRORS = 1
+
+
+def inspect_runtime(*, persist_enabled: bool, persist_ok: bool | None,
+                    persist_error: str = "", last_deploy: str = "",
+                    recent_errors: int = 0) -> list[Finding]:
+    """稼働状態を検品する。DBの中身ではなく、仕組みが生きているかを見る。
+
+    persist_ok が None＝まだ一度も確認していない（判定しない）。
+    """
+    out: list[Finding] = []
+
+    # 1) 保存先（Supabase）。ここが死ぬと、お客様の入力が保存されずに消える。
+    #    「保存に失敗してから気づく」のでは遅い。**入力される前に**検知する。
+    if persist_enabled and persist_ok is False:
+        out.append(Finding(
+            True, f"保存先(Supabase)に接続できません。この状態でお客様が入力しても"
+                  f"保存されず、次回の更新で消えます。{('原因: ' + persist_error) if persist_error else ''}"))
+
+    # 2) 日次更新が動いているか。止まっていること自体をアプリが自己申告する。
+    #    監視の仕組みが止まっても、画面とAPIの両方から気づけるようにするため。
+    if last_deploy:
+        try:
+            d = datetime.datetime.fromisoformat(last_deploy.replace("Z", "+00:00")).date()
+            days = (_today() - d).days
+            if days > MAX_DEPLOY_STALE_DAYS:
+                out.append(Finding(
+                    True, f"毎日の自動更新が {days} 日間動いていません"
+                          f"（最終 {d}）。更新の仕組み自体が止まっている可能性があります"))
+        except (ValueError, TypeError):
+            pass
+
+    # 3) 画面エラー（500）。握り潰さずに数え、出す。
+    if recent_errors > MAX_RECENT_ERRORS:
+        out.append(Finding(
+            False, f"直近で画面エラーが {recent_errors} 件発生しています。"
+                   "操作できない画面がある可能性があります"))
+
+    return out
+
+
 def format_report(findings: list[Finding], *, counts: dict[str, int] | None = None) -> str:
     """人が読む検品結果。件数を必ず添える（「異常なし」とだけ言わない）。"""
     lines = []

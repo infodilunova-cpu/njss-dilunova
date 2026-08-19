@@ -48,6 +48,12 @@ jobs:
           else:
               print(f"- 総件数: {d.get('total', 0):,} 件")
               print(f"- 最新公告: {d.get('latest_announced') or '不明'}")
+              # データの中身だけでなく、仕組みが生きているかも見る
+              pok = d.get("persist_ok")
+              print(f"- 保存先(Supabase): {'正常' if pok else ('接続できません' if pok is False else '未使用')}")
+              print(f"- 最終デプロイ: {d.get('last_deploy') or '不明'}")
+              if d.get("recent_errors"):
+                  print(f"- 直近の画面エラー: {d['recent_errors']} 件")
               for k, v in sorted(d.get("sources", {}).items(), key=lambda kv: -kv[1]):
                   print(f"  - {k}: {v:,} 件")
               if d.get("reason"):

@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<article class="detail">
+  <h1>画面の表示に失敗しました</h1>
+  <p>
+    申し訳ございません。この画面の処理でエラーが発生しました。
+    <strong>入力された内容は失われていません。</strong>
+  </p>
+  <p class="muted">
+    エラーは自動的に記録され、こちらで確認できるようになっています。ご連絡は不要です。
+  </p>
+  <p>
+    <a class="btn primary" href="{{ url_for("cases") }}">案件を探すへ戻る</a>
+    <a class="btn ghost" href="{{ url_for("applications", sheet="公共") }}">管理シートへ戻る</a>
+  </p>
+  {% if path %}<p class="muted">（{{ path }}）</p>{% endif %}
+</article>
+{% endblock %}

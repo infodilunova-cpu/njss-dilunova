@@ -188,6 +188,88 @@ def inject_profile_set():
         return {"profile_set": False}
 
 
+# ------------------------------------------------------------
+# 稼働まわりの見張り（データの中身ではなく「仕組みが生きているか」）
+# ------------------------------------------------------------
+# 直近に起きた画面エラー(500)。握り潰さずに数え、健全性APIと画面に出す。
+# --workers 1 前提のプロセス内共有。再起動で消えてよい（傾向が見たいだけ）。
+_recent_errors: list[dict] = []
+_MAX_KEEP_ERRORS = 20
+
+# 保存先の死活確認は毎回やると重い。短時間だけ結果を使い回す。
+_persist_probe: dict = {"at": 0.0, "ok": None, "error": ""}
+_PERSIST_PROBE_TTL = 300  # 秒
+
+
+def _record_error(where: str, err: Exception) -> None:
+    """画面エラーを記録する。**黙って500を返すだけにしない。**"""
+    import datetime as _dt
+    _recent_errors.append({
+        "at": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "where": where, "error": f"{type(err).__name__}: {str(err)[:200]}",
+    })
+    del _recent_errors[:-_MAX_KEEP_ERRORS]
+    app.logger.exception("画面エラー: %s", where)
+
+
+def _persist_alive() -> tuple[bool | None, str]:
+    """保存先(Supabase)に本当に繋がるかを確かめる。
+
+    「保存に失敗してから気づく」のでは遅い。**お客様が入力する前に**、
+    外形監視が保存先の死を検知できるようにするための確認。
+    無料プランは放置で一時停止することがあるため、これが効く。
+    """
+    import time
+    import supa
+    if not supa.enabled():
+        return None, ""
+    now = time.time()
+    if _persist_probe["ok"] is not None and now - _persist_probe["at"] < _PERSIST_PROBE_TTL:
+        return _persist_probe["ok"], _persist_probe["error"]
+    try:
+        d = supa.diagnose()
+        ok = bool(d.get("connected") and d.get("rw_ok"))
+        err = "" if ok else (d.get("error") or "読み書きできません")
+    except Exception as e:  # noqa: BLE001
+        ok, err = False, f"{type(e).__name__}: {str(e)[:120]}"
+    _persist_probe.update({"at": now, "ok": ok, "error": err})
+    return ok, err
+
+
+def _last_deploy_stamp() -> str:
+    """毎日の自動更新が最後に正常終了した時刻。
+
+    これが古い＝日次更新の仕組み自体が止まっている。
+    監視の仕組みが止まっても、アプリ側から自己申告できるようにする。
+
+    【注意】判断材料を2つ持つ:
+      - .last-deploy        … デプロイのたびに押される
+      - data_baseline.json  … **検品が正常だった回にだけ**更新される
+    後者のほうが「まともなデータで更新できた」ことを表す強い信号。
+    姉妹アプリのように .last-deploy を使わないデプロイ方式だと前者は
+    古いまま固まるため、**新しいほうを採る**（片方が止まっても誤報にしない）。
+    """
+    from pathlib import Path as _P
+    stamps = []
+    try:
+        stamps.append(_P(__file__).with_name(".last-deploy").read_text(encoding="utf-8").strip())
+    except OSError:
+        pass
+    try:
+        import json as _json
+        data = _json.loads(_P(__file__).with_name("data_baseline.json").read_text(encoding="utf-8"))
+        # **"full" だけを見る。** "fast" は開発機の毎朝のジョブが書くもので、
+        # 本番の更新が止まっていても新しい日付が入りうる。それを信じると
+        # 「開発機が動いているから本番も元気」と誤判定して、監視が死ぬ。
+        v = data.get("full")
+        if isinstance(v, dict) and v.get("updated"):
+            stamps.append(str(v["updated"]))
+    except (OSError, ValueError):
+        pass
+    # ISO文字列は辞書順＝時系列順なので、日付部分で比べれば最新が採れる
+    return max((x for x in stamps if x), key=lambda x: x[:10], default="")
+
+
 def _data_health() -> dict:
     """データの鮮度・件数・検品結果を1つの dict にまとめる。
 
@@ -208,6 +290,17 @@ def _data_health() -> dict:
             info["latest"] = dx.latest_announced(conn)
         info["total"] = sum(counts.values())
         info["sources"] = counts
+
+        # データの中身だけでなく、**仕組みが生きているか**も同じ基準で見る。
+        import supa as _supa
+        p_ok, p_err = _persist_alive()
+        findings += dx.inspect_runtime(
+            persist_enabled=_supa.enabled(), persist_ok=p_ok, persist_error=p_err,
+            last_deploy=_last_deploy_stamp(), recent_errors=len(_recent_errors))
+        info["persist_ok"] = p_ok
+        info["last_deploy"] = _last_deploy_stamp()
+        info["recent_errors"] = len(_recent_errors)
+
         info["critical"] = sum(1 for f in findings if f.critical)
         if findings:
             info["stale"] = True
@@ -255,10 +348,29 @@ def api_data_health():
         "latest_announced": h["latest"],
         "critical": h["critical"],
         "sources": h["sources"],
+        "persist_ok": h.get("persist_ok"),
+        "last_deploy": h.get("last_deploy", ""),
+        "recent_errors": h.get("recent_errors", 0),
         "reason": h["stale_reason"],
         "checked_at": date.today().isoformat(),
     }
     return jsonify(body), (503 if h["critical"] else 200)
+
+
+@app.errorhandler(Exception)
+def _handle_unexpected(e):
+    """想定外のエラーを**記録してから**返す。
+
+    未処理例外がそのまま500になると、白い画面が出るだけで誰にも届かない。
+    お客様は「動かない」としか分からず、こちらは気づけない。
+    ここで必ず記録し、健全性API・外形監視に載せる。
+    握り潰して200を返すことはしない（壊れているのに正常に見えるほうが悪い）。
+    """
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return e  # 404などの正規のHTTPエラーはそのまま
+    _record_error(request.path if request else "?", e)
+    return render_template("error.html", path=(request.path if request else "")), 500
 
 
 @app.route("/healthz")
